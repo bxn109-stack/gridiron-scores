@@ -7,6 +7,10 @@ on:
     # One full sweep a day to catch late stat corrections and next games.
     - cron: "7 12 * * *"
   workflow_dispatch:
+  # Also run right away when the robot's own code changes.
+  push:
+    branches: [main]
+    paths: ["fetch_scores.py", ".github/workflows/scores.yml"]
 
 permissions:
   contents: write
@@ -24,7 +28,7 @@ jobs:
 
       - name: Fetch ESPN scores
         env:
-          FULL: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '7 12 * * *' }}
+          FULL: ${{ github.event_name != 'schedule' || github.event.schedule == '7 12 * * *' }}
         run: |
           if [ "$FULL" = "true" ]; then python3 fetch_scores.py --full; else python3 fetch_scores.py; fi
 
