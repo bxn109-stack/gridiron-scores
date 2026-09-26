@@ -57,9 +57,26 @@ SUFFIX = re.compile(r"\b(jr|sr|ii|iii|iv|v)\b")
 
 def norm(s):
     s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode().lower()
-    s = s.replace("'", "").replace("\u2019", "").replace("&", " and ").replace("(d2)", " ").replace("st.", "state")
+    s = s.replace("'", "").replace("\u2019", "").replace("&", " and ").replace("st.", "state")
+    s = re.sub(r"\((naia|d2|d3|dii|diii|d-ii|d-iii|fcs|fbs)\)", " ", s)  # division tags, not part of the name
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
-    return " ".join(s.split())
+    s = " ".join(s.split())
+    return ALIAS.get(s, s)
+
+
+# Names that differ between the ledger's sources and ESPN (both sides map to one spelling).
+ALIAS = {
+    "ualbany": "albany", "uconn": "connecticut", "umass": "massachusetts", "app state": "appalachian state",
+    "appalachian st": "appalachian state", "pitt": "pittsburgh", "ole miss": "mississippi", "nc state": "north carolina state",
+    "southern miss": "southern mississippi", "ul monroe": "louisiana monroe", "ulm": "louisiana monroe",
+    "sam houston": "sam houston state", "etsu": "east tennessee state", "liu": "long island university",
+    "fiu": "florida international", "fau": "florida atlantic", "usf": "south florida", "ucf": "central florida",
+    "smu": "southern methodist", "tcu": "texas christian", "byu": "brigham young", "unlv": "nevada las vegas",
+    "utep": "texas el paso", "utsa": "texas san antonio", "uab": "alabama birmingham", "lsu": "louisiana state",
+    "nc a and t": "north carolina a and t", "mcneese": "mcneese state", "nicholls": "nicholls state",
+    "grambling": "grambling state", "ut martin": "tennessee martin", "ul lafayette": "louisiana",
+    "miami fl": "miami", "hawaii": "hawaii", "san jose state": "san jose state",
+}
 
 
 def team_sim(name, t):
@@ -81,6 +98,14 @@ def team_sim(name, t):
     return best
 
 
+def pair_score(sa, sb, close):
+    """Both teams must match; or one team's name matches exactly at the same kickoff (a team plays once a day)."""
+    score = min(sa, sb)
+    if close and max(sa, sb) >= 1.0:
+        score = max(score, 0.81)
+    return score
+
+
 def match(g, pool):
     """Best ESPN game for ledger game g. Returns (espn_game, swapped) or (None, None)."""
     ko = when(g["ko"])
@@ -94,8 +119,9 @@ def match(g, pool):
         ed = when(e.get("date"))
         if not ed or abs((ed - ko).total_seconds()) > 36 * 3600:
             continue
-        straight = min(team_sim(g["a"]["n"], e["away"]), team_sim(g["h"]["n"], e["home"]))
-        flipped = min(team_sim(g["a"]["n"], e["home"]), team_sim(g["h"]["n"], e["away"])) - 0.05
+        close = abs((ed - ko).total_seconds()) <= 90 * 60
+        straight = pair_score(team_sim(g["a"]["n"], e["away"]), team_sim(g["h"]["n"], e["home"]), close)
+        flipped = pair_score(team_sim(g["a"]["n"], e["home"]), team_sim(g["h"]["n"], e["away"]), close) - 0.05
         if straight >= flipped:
             cands.append((straight, e, False))
         else:
