@@ -1,0 +1,39 @@
+name: Fetch scores
+
+on:
+  schedule:
+    # Every 15 minutes during US game windows (times are UTC: 11 AM to 2:59 AM Eastern).
+    - cron: "*/15 0-6,15-23 * * *"
+    # One full sweep a day to catch late stat corrections and next games.
+    - cron: "7 12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fetch-scores
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch ESPN scores
+        env:
+          FULL: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '7 12 * * *' }}
+        run: |
+          if [ "$FULL" = "true" ]; then python3 fetch_scores.py --full; else python3 fetch_scores.py; fi
+
+      - name: Save changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A scores box
+          if git diff --cached --quiet; then echo "No changes to save"; exit 0; fi
+          git commit -q -m "Scores $(date -u +%Y-%m-%dT%H:%MZ)"
+          git pull -q --rebase origin "${GITHUB_REF_NAME}" || true
+          git push -q
