@@ -10,6 +10,7 @@ Writes
 Usage
   python3 fetch_scores.py          quick run: refreshes yesterday and today (ET)
   python3 fetch_scores.py --full   full run: refreshes the whole window
+  python3 fetch_scores.py --busy   exit 0 if a game is on or starts within 45 minutes
 """
 import datetime as dt
 import json
@@ -144,7 +145,30 @@ def parse_box(summary):
     return out
 
 
+def busy():
+    """Exit code 0 when a game is in progress or kicks off within 45 minutes (keep the robot running)."""
+    try:
+        with open(os.path.join(ROOT, "scores", "latest.json")) as f:
+            games = json.load(f).get("games", [])
+    except (OSError, ValueError):
+        return 1
+    now = dt.datetime.now(dt.timezone.utc)
+    for g in games:
+        if g.get("state") == "in":
+            return 0
+        if g.get("state") == "pre" and g.get("status") not in ("STATUS_POSTPONED", "STATUS_CANCELED"):
+            try:
+                ko = dt.datetime.fromisoformat(g["date"].replace("Z", "+00:00"))
+            except (KeyError, ValueError):
+                continue
+            if now - dt.timedelta(minutes=30) <= ko <= now + dt.timedelta(minutes=45):
+                return 0
+    return 1
+
+
 def main():
+    if "--busy" in sys.argv:
+        sys.exit(busy())
     full = "--full" in sys.argv
     now = dt.datetime.now(ET)
     today = now.date()
