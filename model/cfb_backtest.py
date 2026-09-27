@@ -41,7 +41,8 @@ def get(path, **params):
                 data = json.load(r)
             break
         except Exception as e:
-            if i == 3:
+            code = getattr(e, "code", None)
+            if i == 3 or (code is not None and 400 <= code < 500 and code != 429):
                 raise
             print(f"retry {path} {params}: {e}", file=sys.stderr)
             time.sleep(5 * (i + 1))
@@ -178,6 +179,21 @@ def ou(out, yrs, thr, key="tot"):
     return w, l, (w / n if n else float("nan")), (((w * 100 / 110) - l) / n if n else float("nan"))
 
 
+GRID = dict(k=[0.06, 0.09, 0.12], regress=[0.5, 0.65, 0.8], hfa=[2.0, 2.5, 3.0], cap=[21, 28], fcs_start=[-12.0, -20.0])
+
+
+def tune(G):
+    """Best points-rating settings by average miss on the tuning seasons only."""
+    start = dict(k=0.08, kt=0.05, regress=0.65, hfa=2.5, cap=28, fcs_start=-18.0)
+    best = None
+    for vals in itertools.product(*GRID.values()):
+        p = dict(start, **dict(zip(GRID, vals)))
+        e = mae(run(G, p), TUNE)[0]
+        if best is None or e < best[0]:
+            best = (e, p)
+    return best[1]
+
+
 def main():
     if not KEY:
         print("CFBD_API_KEY secret is not set. Add it under Settings -> Secrets and variables -> Actions.")
@@ -185,15 +201,8 @@ def main():
     G = load()
     with_line = sum(1 for g in G if g["close"] is not None)
     print(f"{len(G)} games loaded, {with_line} with a closing line, {sum(1 for g in G if g['open'] is not None)} with an opening line")
-    base = dict(k=0.08, kt=0.05, regress=0.65, hfa=2.5, cap=28, fcs_start=-18.0)
-    grid = dict(k=[0.06, 0.09, 0.12], regress=[0.5, 0.65, 0.8], hfa=[2.0, 2.5, 3.0], cap=[21, 28], fcs_start=[-12.0, -20.0])
-    best = None
-    for vals in itertools.product(*grid.values()):
-        p = dict(base, **dict(zip(grid, vals)))
-        e = mae(run(G, p), TUNE)[0]
-        if best is None or e < best[0]:
-            best = (e, p)
-    p = best[1]
+    grid = GRID
+    p = tune(G)
     out = run(G, p)
     L = ["# College football model backtest", "",
          f"Updated {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}. Walk-forward ratings; tuned on {TUNE[0]}–{TUNE[1]}, tested on {TEST[0]}–{TEST[1]} (never seen while tuning).",
