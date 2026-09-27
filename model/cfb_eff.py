@@ -227,17 +227,25 @@ def line_move(out, yrs, thr):
     return n, tw, aw, (st.mean(pts) if n else float("nan"))
 
 
-def blend(out, key, yrs_fit, yrs_test):
-    """Fit margin = a·line + b·model on tuning seasons; score on test. Beats the line only if the model adds information."""
-    X, y = [], []
-    for g, m, t in out:
-        if in_yrs(g, yrs_fit) and g[key] is not None:
-            X.append([g[key], m]); y.append(max(-42, min(42, g["hp"] - g["ap"])))
+def blend(out, key):
+    """Fit margin = a·line + b·model on earlier seasons; score on later ones. Beats the line only if the model adds information.
+    Opening lines only go back a few seasons, so those are fitted on the first two test seasons and scored on the rest."""
+    for yrs_fit, yrs_test in ((TUNE, TEST), ((TEST[0], TEST[0] + 1), (TEST[0] + 2, TEST[1]))):
+        X, y = [], []
+        for g, m, t in out:
+            if in_yrs(g, yrs_fit) and g[key] is not None:
+                X.append([g[key], m]); y.append(max(-42, min(42, g["hp"] - g["ap"])))
+        if len(X) >= 300:
+            break
+    else:
+        return None
     w = solve(X, y)
     xs = [(g, m) for g, m, t in out if in_yrs(g, yrs_test) and g[key] is not None]
+    if not xs:
+        return None
     e_line = st.mean(abs(g["hp"] - g["ap"] - g[key]) for g, m in xs)
     e_bl = st.mean(abs(g["hp"] - g["ap"] - (w[0] * g[key] + w[1] * m)) for g, m in xs)
-    return w, e_line, e_bl, len(xs)
+    return w, e_line, e_bl, len(xs), yrs_fit, yrs_test
 
 
 B_P = {}
@@ -286,6 +294,7 @@ def main():
          "## Data check", "",
          f"- Games: {len(G)}; with a closing line: {len(lined)}; with advanced stats for both teams: {both} (of the lined games: {both_l})",
          f"- Talent ratings: {len(talent)} team-seasons; returning production: {len(ret)} team-seasons",
+         f"- Games with an opening line: tuning seasons {sum(1 for g in lined if in_yrs(g, TUNE) and g['open'] is not None)}, test seasons {sum(1 for g in lined if in_yrs(g, TEST) and g['open'] is not None)}",
          f"- Advanced-stat fields seen: `{', '.join(sorted((sample or {}).keys()))}`; offense fields: `{', '.join(sorted(((sample or {}).get('offense') or {}).keys()))}`",
          *[f"- {x}" for x in LOG],
          f"- Efficiency settings: `{json.dumps(p)}`; points-rating settings: `{json.dumps({k: B_P[k] for k in B.GRID})}`",
@@ -304,13 +313,17 @@ def main():
             cells = [f"{mae_of(out, yrs)[0]:.2f}" for yrs in (TUNE, TEST)]
         L.append(f"| {nm} | {cells[0]} | {cells[1]} |")
 
-    L += ["", "## Does the model add anything the line doesn't already know? (test seasons)", "",
-          "Fits final margin = a × line + b × model on the tuning seasons, then checks the average miss on the test seasons. "
+    L += ["", "## Does the model add anything the line doesn't already know?", "",
+          "Fits final margin = a × line + b × model on earlier seasons, then checks the average miss on later seasons it never saw. "
           "If the blend misses by less than the line alone, the model carries real information the market missed.", "",
-          "| Line | Weight on line | Weight on model | Line alone | Line + model | Games |", "|---|---|---|---|---|---|"]
+          "| Line | Fitted on | Scored on | Weight on line | Weight on model | Line alone | Line + model | Games |", "|---|---|---|---|---|---|---|---|"]
     for key, nm in (("close", "Closing"), ("open", "Opening")):
-        w, e_l, e_b, n = blend(out_all, key, TUNE, TEST)
-        L.append(f"| {nm} | {w[0]:.2f} | {w[1]:.2f} | {e_l:.3f} | {e_b:.3f} | {n} |")
+        r = blend(out_all, key)
+        if r is None:
+            L.append(f"| {nm} | not enough games with this line | | | | | | |")
+            continue
+        w, e_l, e_b, n, yf, yt = r
+        L.append(f"| {nm} | {yf[0]}–{yf[1]} | {yt[0]}–{yt[1]} | {w[0]:.2f} | {w[1]:.2f} | {e_l:.3f} | {e_b:.3f} | {n} |")
 
     L += ["", "## Spread bets on test seasons, new model (at −110)", "",
           "| Model disagrees by | vs closing line | vs opening line |", "|---|---|---|"]
