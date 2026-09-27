@@ -9,12 +9,12 @@ Recruiting talent and returning production act as an early-season prior.
 A straight-line blend of those inputs (plus the points rating) is fitted on 2014-2019 only, then scored
 on 2021-2025, which it never saw. Writes model/results/cfb_efficiency.md (summary only).
 """
-import itertools, json, os, statistics as st, sys, time
+import itertools, json, os, statistics as st, sys, time, traceback, urllib.parse, urllib.request
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cfb_backtest as B  # noqa: E402
-from cfb_backtest import f, get, YEARS, TUNE, TEST, group, ats, ou  # noqa: E402
+from cfb_backtest import f, YEARS, TUNE, TEST, group, ats, ou  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -27,32 +27,73 @@ def num(x):
         return None
 
 
-def fetch(path, **params):
+LOG = []                                   # fetch timings, written into the results for troubleshooting
+BUDGET = float(os.environ.get("FETCH_BUDGET_S", "1500"))
+T_START = time.time()
+
+
+def fetch(path, timeout=150, **params):
+    """Cached GET with a total time budget. Returns (data or None, note). Uses the same cache files as cfb_backtest."""
+    fn = os.path.join(B.CACHE, path.strip("/").replace("/", "_") + "_" + "_".join(f"{k}{v}" for k, v in sorted(params.items())) + ".json")
+    if os.path.exists(fn):
+        with open(fn) as fh:
+            return json.load(fh), "cached"
+    if time.time() - T_START > BUDGET:
+        return None, "skipped (time budget; the next run picks it up)"
+    url = f"{B.BASE}{path}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {B.KEY}", "Accept": "application/json"})
+    t = time.time()
     try:
-        return get(path, **params) or []
-    except Exception as e:  # a missing year or endpoint should not stop the whole backtest
-        print(f"skip {path} {params}: {e}", file=sys.stderr)
-        return []
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.load(r)
+    except Exception as e:
+        return None, f"failed after {time.time() - t:.0f} s ({type(e).__name__}: {str(e)[:80]})"
+    os.makedirs(B.CACHE, exist_ok=True)
+    with open(fn, "w") as fh:
+        json.dump(data, fh)
+    return data, f"downloaded in {time.time() - t:.0f} s"
+
+
+def adv_rows(y, stype):
+    data, note = fetch("/stats/game/advanced", year=y, seasonType=stype, excludeGarbageTime="true")
+    LOG.append(f"advanced stats {y} {stype}: {note}, {len(data) if data is not None else 0} rows")
+    if data is not None or note.startswith("skipped"):
+        return data or []
+    rows = []                              # the whole-season call failed: try one week at a time
+    for wk in range(1, 17 if stype == "regular" else 2):
+        d, n = fetch("/stats/game/advanced", timeout=90, year=y, week=wk, seasonType=stype, excludeGarbageTime="true")
+        if d is None:
+            LOG.append(f"  week {wk}: {n}")
+            if n.startswith("skipped"):
+                break
+            continue
+        rows += d
+    LOG.append(f"  by week: {len(rows)} rows")
+    return rows
 
 
 def load_extra():
     adv, talent, ret, sample = {}, {}, {}, None
+    for y in YEARS:                        # small lookups first
+        d, n = fetch("/talent", year=y)
+        for r in d or []:
+            v = num(f(r, "talent"))
+            if v is not None:
+                talent[(y, f(r, "team", "school"))] = v
+        d2, n2 = fetch("/player/returning", year=y)
+        for r in d2 or []:
+            v = num(f(r, "percentPPA", "percent_ppa"))
+            if v is not None:
+                ret[(y, f(r, "team"))] = v
+        LOG.append(f"talent {y}: {n}, {len(d or [])} rows; returning production {y}: {n2}, {len(d2 or [])} rows")
     for y in YEARS:
         for stype in ("regular", "postseason"):
-            for r in fetch("/stats/game/advanced", year=y, seasonType=stype, excludeGarbageTime="true"):
+            for r in adv_rows(y, stype):
                 sample = sample or r
                 gid, team = f(r, "gameId", "game_id"), f(r, "team")
                 o, d = r.get("offense") or {}, r.get("defense") or {}
                 adv[(gid, team)] = {"y": y, "ppa": num(f(o, "ppa")), "sr": num(f(o, "successRate", "success_rate")),
                                     "plays": num(f(o, "plays")), "dppa": num(f(d, "ppa")), "dsr": num(f(d, "successRate", "success_rate"))}
-        for r in fetch("/talent", year=y):
-            v = num(f(r, "talent"))
-            if v is not None:
-                talent[(y, f(r, "team", "school"))] = v
-        for r in fetch("/player/returning", year=y):
-            v = num(f(r, "percentPPA", "percent_ppa"))
-            if v is not None:
-                ret[(y, f(r, "team"))] = v
     return adv, talent, ret, sample
 
 
@@ -246,6 +287,7 @@ def main():
          f"- Games: {len(G)}; with a closing line: {len(lined)}; with advanced stats for both teams: {both} (of the lined games: {both_l})",
          f"- Talent ratings: {len(talent)} team-seasons; returning production: {len(ret)} team-seasons",
          f"- Advanced-stat fields seen: `{', '.join(sorted((sample or {}).keys()))}`; offense fields: `{', '.join(sorted(((sample or {}).get('offense') or {}).keys()))}`",
+         *[f"- {x}" for x in LOG],
          f"- Efficiency settings: `{json.dumps(p)}`; points-rating settings: `{json.dumps({k: B_P[k] for k in B.GRID})}`",
          f"- Spread blend weights (fitted on {n_fit} tuning games): " + ", ".join(f"{names[i]} {w:+.3f}" for i, w in zip(MCOLS_ALL, w_all)),
          f"- Total blend weights ({n_tfit} games): " + ", ".join(f"{nm} {w:+.3f}" for nm, w in zip(["constant", "points-based total", "PPA sum", "success-rate sum", "pace"], w_tot)),
@@ -306,5 +348,19 @@ def main():
     return 0
 
 
+def report_failure():
+    """Write what went wrong into the results file (the Actions log is not visible from the picks setup)."""
+    os.makedirs(os.path.join(HERE, "results"), exist_ok=True)
+    with open(os.path.join(HERE, "results", "cfb_efficiency.md"), "w") as fh:
+        fh.write("# College football efficiency model backtest\n\nThe run stopped with an error at "
+                 + time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime()) + ".\n\n```\n" + traceback.format_exc()[-3000:] + "```\n\n"
+                 + "Fetch log:\n\n" + "\n".join(f"- {x}" for x in LOG) + "\n")
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:
+        traceback.print_exc()
+        report_failure()
+        sys.exit(0)

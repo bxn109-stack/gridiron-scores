@@ -16,7 +16,7 @@ concurrency:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -33,11 +33,14 @@ jobs:
         run: python3 model/cfb_backtest.py
 
       - name: Run college efficiency model
+        continue-on-error: true
+        timeout-minutes: 35
         env:
           CFBD_API_KEY: ${{ secrets.CFBDAPIKEY || secrets.CFBD_API_KEY }}
         run: python3 model/cfb_eff.py
 
       - name: Save results
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
