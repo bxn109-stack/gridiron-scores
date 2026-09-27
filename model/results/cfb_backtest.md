@@ -1,6 +1,6 @@
 # College football model backtest
 
-Updated 2026-09-27 12:33 UTC. Walk-forward ratings; tuned on 2014–2019, tested on 2021–2025 (never seen while tuning).
+Updated 2026-09-27 13:13 UTC. Walk-forward ratings; tuned on 2014–2019, tested on 2021–2025 (never seen while tuning).
 Games: 27513 (12666 with a closing line). Tuned settings: `{"k": 0.12, "regress": 0.8, "hfa": 3.0, "cap": 28, "fcs_start": -20.0}`
 
 - Tuning seasons: model average miss 14.29 pts vs closing line 12.48 pts (5186 games)
