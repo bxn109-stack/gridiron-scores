@@ -227,6 +227,26 @@ def clock_text(e):
     return e.get("detail") or "Live"
 
 
+def clv_of(g, close, swapped):
+    """Points the pick beat (+) or lost (-) the closing line by. None when it can't be measured."""
+    if not close:
+        return None
+    l = g.get("lean") or {}
+    mk, side, ln = l.get("mk"), l.get("side"), l.get("ln")
+    if ln is None:
+        return None
+    if mk == "spread" and side in ("A", "H") and close.get("hm") is not None:
+        hm = -close["hm"] if swapped else close["hm"]          # closing home margin in our orientation
+        fav = (g.get("line") or {}).get("fav")
+        s_pick = -ln if side == fav else ln                     # the side's spread when we picked it
+        s_close = -hm if side == "H" else hm                    # the side's spread at the close
+        return {"pts": round(s_pick - s_close, 1), "close": s_close, "book": close.get("book")}
+    if mk == "total" and side in ("O", "U") and close.get("tot") is not None:
+        pts = close["tot"] - ln if side == "O" else ln - close["tot"]
+        return {"pts": round(pts, 1), "close": close["tot"], "book": close.get("book")}
+    return None
+
+
 def finished(g):
     """True when a game needs nothing more: final, quarter scores saved, props valued and graded."""
     if g.get("st") != "final" or not g.get("per"):
@@ -305,6 +325,10 @@ def main():
                 if swapped:
                     ch["eswap"] = True
             state = e.get("state")
+            if state in ("in", "post") and g.get("tracked") and g.get("clv") is None:
+                cv = clv_of(g, e.get("close"), swapped)
+                if cv is not None:
+                    ch["clv"] = cv
             if state == "pre" or ea.get("score") is None or eh.get("score") is None:
                 if e.get("status") in ("STATUS_POSTPONED", "STATUS_CANCELED", "STATUS_DELAYED") and g.get("clk") != e.get("detail"):
                     ch["clk"] = e.get("detail")
@@ -358,6 +382,9 @@ def main():
                         l = g.get("lean") or {}
                         results[gid] = {"lg": g["lg"], "su": su, "lean": lean, "star": star,
                                         "conf": l.get("conf"), "mk": l.get("mk"), "props": cnt}
+                        cv = ch.get("clv") or g.get("clv")
+                        if cv:
+                            results[gid]["clv"] = cv.get("pts")
             else:
                 if g.get("clk") != e.get("detail"):
                     ch["clk"] = e.get("detail")
