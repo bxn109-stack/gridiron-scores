@@ -1,0 +1,43 @@
+name: Model backtest
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["model/*.py", ".github/workflows/model.yml"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: model
+  cancel-in-progress: true
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Raw College Football Data downloads stay in this private cache, never in the repo.
+      - uses: actions/cache@v4
+        with:
+          path: model/.cache
+          key: cfbd-${{ github.run_id }}
+          restore-keys: cfbd-
+
+      - name: Run college backtest
+        env:
+          CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
+        run: python3 model/cfb_backtest.py
+
+      - name: Save results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add model/results || true
+          if git diff --cached --quiet; then echo "No new results"; exit 0; fi
+          git commit -q -m "Model backtest results $(date -u +%Y-%m-%dT%H:%MZ)"
+          git pull -q --rebase origin "${GITHUB_REF_NAME}" || true
+          git push -q
