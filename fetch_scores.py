@@ -70,6 +70,36 @@ def team_of(c):
     }
 
 
+def to_num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def odds_of(comp, home_abbr, away_abbr):
+    """The book line ESPN shows before kickoff, as the home team's expected margin (+ = home favored)."""
+    for o in comp.get("odds") or []:
+        tot = to_num(o.get("overUnder"))
+        hm = None
+        det = (o.get("details") or "").strip()          # e.g. "KC -3.5" or "EVEN"
+        if det.upper() in ("EVEN", "PK", "PICK"):
+            hm = 0.0
+        elif det:
+            parts = det.rsplit(" ", 1)
+            if len(parts) == 2 and to_num(parts[1]) is not None:
+                ab, num = parts[0].strip(), to_num(parts[1])
+                if ab == home_abbr:
+                    hm = -num
+                elif ab == away_abbr:
+                    hm = num
+        if hm is None and to_num(o.get("spread")) is not None:
+            hm = -to_num(o.get("spread"))                   # ESPN's spread is the home team's line
+        if hm is not None or tot is not None:
+            return {"hm": hm, "tot": tot, "book": (o.get("provider") or {}).get("name"), "details": det or None}
+    return None
+
+
 def parse_event(ev, lg):
     comp = (ev.get("competitions") or [{}])[0]
     status = comp.get("status") or ev.get("status") or {}
@@ -92,6 +122,7 @@ def parse_event(ev, lg):
         "neutral": bool(comp.get("neutralSite")),
         "away": team_of(away),
         "home": team_of(home),
+        "odds": odds_of(comp, (home.get("team") or {}).get("abbreviation"), (away.get("team") or {}).get("abbreviation")),
     }
 
 
@@ -193,6 +224,9 @@ def main():
             for ev in data.get("events") or []:
                 g = parse_event(ev, lg)
                 if g:
+                    old_g = games.get(g["id"]) or {}
+                    # closing line = the last line seen before kickoff
+                    g["close"] = g["odds"] if (g["state"] == "pre" and g.get("odds")) else old_g.get("close")
                     games[g["id"]] = g
 
     # keep only the rolling window
