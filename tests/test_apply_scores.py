@@ -1,5 +1,6 @@
 """Tests for apply_scores.py: archive grading, pick locks, voids, pushes and the pregame record."""
 import json
+import math
 import os
 import subprocess
 import sys
@@ -62,6 +63,12 @@ class Run:
         os.makedirs(p, exist_ok=True)
         dump({"slate": slate, "league": lg, "games": {g["id"]: g for g in games}}, os.path.join(p, f"{lg}.json"))
 
+    def model(self, obj):
+        dump(obj, os.path.join(self.tmp, "model.json"))
+
+    def players(self, obj):
+        dump(obj, os.path.join(self.tmp, "players.json"))
+
     def pregame(self, slate, body):
         dump(body, os.path.join(self.tmp, "docs", "pregame", f"{slate}.json"))
 
@@ -78,7 +85,9 @@ class Run:
         out = os.path.join(self.tmp, "out")
         r = subprocess.run([sys.executable, os.path.join(ROOT, "apply_scores.py"), "--docs", os.path.join(self.tmp, "docs"), "--out", out,
                             "--scores", os.path.join(self.tmp, "latest.json"), "--box", os.path.join(self.tmp, "box"),
-                            "--final", os.path.join(self.tmp, "final"), "--now", now] + self.extra, capture_output=True, text=True)
+                            "--final", os.path.join(self.tmp, "final"), "--now", now,
+                            "--model", os.path.join(self.tmp, "model.json"), "--players", os.path.join(self.tmp, "players.json")] + self.extra,
+                           capture_output=True, text=True)
         if r.returncode:
             raise AssertionError(r.stderr)
         man = json.loads(r.stdout)
@@ -243,6 +252,107 @@ class Pregame(unittest.TestCase):
             self.assertEqual(q["ml"], {"H": 150, "A": -170})
             self.assertEqual(q["spread"]["A"], [-3.5, -110])
             self.assertEqual(q["total"], DK["total"])
+
+
+def fake_model():
+    n0 = -12
+    p = [0.01] * 33
+    p[3 - n0], p[4 - n0], p[7 - n0] = 0.10, 0.05, 0.06
+    rest = 1 - sum(p)
+    row = {"n0": n0, "p": p, "lo": rest / 2, "hi": rest / 2, "w": 100}
+    t0 = 45 - 16
+    tp = [0.02] * 33
+    tp[44 - t0] = 0.05
+    trest = 1 - sum(tp)
+    trow = {"n0": t0, "p": tp, "lo": trest / 2, "hi": trest / 2, "w": 100}
+    return {"updatedAt": "2026-11-04T09:17Z", "leagues": {"NFL": {
+        "ratings": {"DEN": {"r": -1.0, "o": 0.5, "d": 0.2}, "KC": {"r": 2.0, "o": 1.0, "d": -0.5}},
+        "state": {"lg": 22.0, "hfa": 2.0, "asof": "2026-11-02T20:15"},
+        "push": {"margin": {"3.5": row}, "total": {"44.5": trow}},
+        "spread": {"pass": False, "why": "no reliable gain", "a": 0.0, "b": 0.0, "scale": 3.0, "thr": 2, "ats": [684, 691]},
+        "total": {"pass": False, "why": "no reliable gain"}, "ml": {"pass": False, "w": [0.0, 1.0, 0.0]},
+        "mae": {"model": 10.2, "close": 9.8, "n": 2761}, "live": {"ats": [24, 29], "thr": 2}}}}
+
+
+def fake_players():
+    return {"updatedAt": "2026-11-04T09:20Z", "throughWeek": 8, "sd": {"rec_yds": [12.0, 0.4]}, "coverage": {},
+            "players": {"courtlandsutton": [{"name": "Courtland Sutton", "team": "DEN", "m": {"rec_yds": 70.0, "td": 0.5}}]}}
+
+
+class ModelLayer(unittest.TestCase):
+    """Phases 2-4 data path: push tables, the model's numbers and prop projections reach pregame, the lock and results."""
+
+    def test_pregame_lock_and_results(self):
+        with tempfile.TemporaryDirectory() as t:
+            R = Run(t)
+            R.model(fake_model()); R.players(fake_players())
+            close = {"hm": 3.5, "tot": 44.5, "book": "DraftKings"}
+            pre = espn("E9", "2026-11-08T18:00Z", ("Denver", "Broncos", "DEN"), ("Kansas City", "Chiefs", "KC"), state="pre",
+                       quotes={"DraftKings": DK}, qopen={"DraftKings": DK})
+            R.feed([pre])
+            prop = {"pl": "Courtland Sutton", "tm": "DEN", "mk": "Rec yds", "ln": 50.5, "side": "O", "odds": "-115"}
+            g = ledger_game("G9", "2026-11-08T13:00:00-05:00", "Broncos", "Chiefs", eid="E9", props=[prop])
+            R.doc("2026-11-07", "NFL", [g])
+            _, files, _ = R.go()
+            pg = files[("pregame", "2026-11-07")]
+            ent = pg["games"]["G9"]
+            self.assertEqual(ent["pmf"]["m"]["n0"], -12)                     # the 3.5 row (home -3.5)
+            self.assertEqual(ent["pmf"]["t"]["n0"], 29)
+            self.assertEqual(ent["lm"]["m"], 5.0)                             # 2 - (-1) + 2 home field
+            self.assertAlmostEqual(ent["lm"]["t"], 45.8, places=6)
+            self.assertAlmostEqual(ent["pp"][0]["p"], 0.687, places=2)        # 70 projected vs 50.5, sd 40
+            self.assertFalse(pg["gates"]["leagues"]["NFL"]["spread"]["pass"])
+            self.assertEqual(pg["coverage"], {"tracked": 1, "priced": 1})
+            R.pregame("2026-11-07", pg)
+            # kickoff: the lock keeps what the model said before the game
+            live = dict(pre, state="in", status="STATUS_IN_PROGRESS", close=close, qclose={"DraftKings": DK})
+            live["away"] = dict(pre["away"], score=7); live["home"] = dict(pre["home"], score=10)
+            R.feed([live])
+            _, files, _ = R.go("2026-11-08T18:30:00+00:00")
+            ch = files[("slates/2026-11-07/leagues", "NFL")]["games"]["G9"]
+            self.assertEqual(ch["lock"]["lm"]["m"], 5.0)
+            self.assertAlmostEqual(ch["lock"]["pp"][0], 0.687, places=2)
+            self.assertTrue(0.5 < ch["clv"]["p"] < 0.6)                       # -3 is a better number than the -3.5 close
+            self.assertAlmostEqual(ch["clv"]["push"], 0.10, places=2)
+            g.update(ch)
+            R.doc("2026-11-07", "NFL", [g])
+            # final: home wins by 7, total 47; Sutton 60 yards
+            fin = espn("E9", "2026-11-08T18:00Z", ("Denver", "Broncos", "DEN"), ("Kansas City", "Chiefs", "KC"), sc=(20, 27),
+                       lines=((7, 3, 7, 3), (7, 10, 3, 7)), close=close, qclose={"DraftKings": DK})
+            R.feed([fin]); R.box("E9", [{"n": "Courtland Sutton", "tm": "DEN", "rec": 5, "recYds": 60}])
+            _, files, _ = R.go("2026-11-08T22:00:00+00:00")
+            res = files[("results", "2026-11-07")]["games"]["G9"]
+            self.assertEqual(res["lean"], "W")
+            self.assertTrue(0.5 < res["cp"] < 0.6)
+            self.assertEqual(res["lme"], [1.5, "W", 1.3, "W"])
+            self.assertEqual(len(res["pp"]), 1)
+            self.assertEqual(res["pp"][0][1], 1)
+            self.assertAlmostEqual(res["pp"][0][2], (115 / 215) / 1.045, places=3)
+
+    def test_no_model_files_no_model_fields(self):
+        with tempfile.TemporaryDirectory() as t:
+            R = Run(t)
+            R.feed([espn("E3", "2026-11-08T18:00Z", ("Denver", "Broncos", "DEN"), ("Kansas City", "Chiefs", "KC"), state="pre", quotes={"DraftKings": DK})])
+            R.doc("2026-11-07", "NFL", [ledger_game("G3", "2026-11-08T13:00:00-05:00", "Broncos", "Chiefs", eid="E3")])
+            _, files, _ = R.go()
+            ent = files[("pregame", "2026-11-07")]["games"]["G3"]
+            for k in ("pmf", "lm", "pp"):
+                self.assertNotIn(k, ent)
+
+    def test_prop_projection_sides_and_markets(self):
+        P = fake_players()
+        over = AS.prop_projection(P, {"pl": "Courtland Sutton", "tm": "DEN", "mk": "Rec yds", "ln": 50.5, "side": "O"})
+        under = AS.prop_projection(P, {"pl": "Courtland Sutton", "tm": "DEN", "mk": "Rec yds", "ln": 50.5, "side": "U"})
+        self.assertAlmostEqual(over["p"] + under["p"], 1, places=3)
+        td = AS.prop_projection(P, {"pl": "Courtland Sutton", "mk": "Anytime TD", "side": "Y"})
+        self.assertAlmostEqual(td["p"], 1 - math.exp(-0.5), places=3)
+        self.assertIsNone(AS.prop_projection(P, {"pl": "Courtland Sutton", "mk": "Longest rec", "ln": 20.5, "side": "O"}))
+        self.assertIsNone(AS.prop_projection(P, {"pl": "Courtland Sutton", "mk": "Rec yds (alt 70+)", "ln": 69.5, "side": "O"}))
+        self.assertIsNone(AS.prop_projection(P, {"pl": "Nobody Here", "mk": "Rec yds", "ln": 50.5, "side": "O"}))
+
+    def test_model_result_against_the_close(self):
+        self.assertEqual(AS.model_result({"m": 5.0, "t": 40.0}, 3.5, 44.5, {"a": 20, "h": 23}), [1.5, "L", -4.5, "W"])
+        self.assertEqual(AS.model_result({"m": 3.5}, 3.5, None, {"a": 0, "h": 7})[:2], [0.0, None])
 
 
 if __name__ == "__main__":

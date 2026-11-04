@@ -2,6 +2,9 @@ name: Model backtest
 
 on:
   workflow_dispatch:
+  schedule:
+    # Tuesday and Friday 09:17 UTC: fresh ratings, push tables and prop projections before the boards are built
+    - cron: "17 9 * * 2,5"
   push:
     branches: [main]
     paths: ["model/*.py", ".github/workflows/model.yml"]
@@ -28,11 +31,25 @@ jobs:
           restore-keys: cfbd-
 
       - name: Run college backtest
+        if: github.event_name != 'schedule'
         env:
           CFBD_API_KEY: ${{ secrets.CFBDAPIKEY || secrets.CFBD_API_KEY }}
         run: python3 model/cfb_backtest.py
 
+      - name: Ledger Model (NFL and college ratings, gates, push tables)
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          CFBD_API_KEY: ${{ secrets.CFBDAPIKEY || secrets.CFBD_API_KEY }}
+        run: python3 model/ledger_model.py
+
+      - name: NFL prop projections
+        continue-on-error: true
+        timeout-minutes: 10
+        run: python3 model/nfl_props.py
+
       - name: Run college efficiency model
+        if: github.event_name != 'schedule'
         continue-on-error: true
         timeout-minutes: 35
         env:

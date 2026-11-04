@@ -13,7 +13,10 @@ and optionally DIR/results/<slate>.json. The script:
     first time the game is seen after kickoff, so later edits cannot change a graded pick,
   - reads the season archive (scores/final/<date>.json) for games older than the live feed's 4-day window,
   - marks a prop unresolved (U) when the player or market is missing from the final box score a day after the game,
-  - writes pregame/<slate>: sportsbook quotes (current, opening, closing) and an append-only history of the picks,
+  - writes pregame/<slate>: sportsbook quotes (current, opening, closing), an append-only history of the picks, the
+    chance of landing on each nearby number (push tables), the Ledger Model's numbers and NFL prop projections, plus
+    the model gates (from model/results in this repo), so the page can price pushes and check each phase's gate,
+  - records at the lock what the closing market and the model said, so the page can measure them after the game,
   - writes one update file per changed doc plus meta/live, and prints a JSON manifest:
       [{"op": "update"|"set", "collection": ..., "doc_id": ..., "file_path": ...}, ...]
 Never changes line, lean, star, props or tracked.
@@ -305,6 +308,235 @@ def swap_quotes(q):
     return out
 
 
+# ---------- Ledger Model, push tables and prop projections (model/results in this repo) ----------
+NFL_ESPN = {"LA": "LAR", "WAS": "WSH"}
+PROP_MARKETS = [("pass yds", "pass_yds"), ("passing yds", "pass_yds"), ("pass att", "pass_att"), ("passing att", "pass_att"),
+                ("completions", "comp"), ("pass td", "pass_td"), ("interceptions", "int"), ("int thrown", "int"),
+                ("rush yds", "rush_yds"), ("rushing yds", "rush_yds"), ("rush att", "rush_att"), ("carries", "rush_att"),
+                ("receptions", "rec"), ("rec yds", "rec_yds"), ("receiving yds", "rec_yds"), ("rush rec yds", "rr_yds"),
+                ("rush and rec", "rr_yds"), ("anytime td", "td")]
+COUNT_MARKETS = {"pass_att", "comp", "pass_td", "int", "rush_att", "rec", "td"}
+
+
+def pname(s):
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower()
+    s = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b\.?", "", s)
+    return re.sub(r"[^a-z]", "", s)
+
+
+def phi(z):
+    import math
+    return 0.5 * (1 + math.erf(z / 2 ** 0.5))
+
+
+def model_league(lg):
+    return "NFL" if lg == "NFL" else "FBS" if lg in COLLEGE else None
+
+
+def pmf_row(table, x):
+    """Row of a push table for market number x (rounded to the nearest half point); None outside the table."""
+    if not table or x is None:
+        return None
+    k = round(x * 2) / 2
+    row = table.get(f"{k:g}")
+    return {"n0": row["n0"], "p": row["p"], "lo": row["lo"], "hi": row["hi"]} if row else None
+
+
+def median(xs):
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    m = len(xs) // 2
+    return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+
+def market_numbers(quotes, close=None, line=None):
+    """Expected home margin and total from book quotes (ledger orientation), else ESPN's close, else the ledger line."""
+    hm = median([-(q.get("spread") or {}).get("H", [None])[0] if (q.get("spread") or {}).get("H") and (q["spread"]["H"][0] is not None) else None
+                 for q in (quotes or {}).values()])
+    tot = median([(q.get("total") or {}).get("O", [None])[0] if (q.get("total") or {}).get("O") else None for q in (quotes or {}).values()])
+    if hm is None and close and close.get("hm") is not None:
+        hm = close["hm"]
+    if tot is None and close and close.get("tot") is not None:
+        tot = close["tot"]
+    if hm is None and line and line.get("sp") is not None and line.get("fav") in ("A", "H"):
+        hm = line["sp"] if line["fav"] == "H" else -line["sp"]
+    if tot is None and line:
+        tot = line.get("tot")
+    return hm, tot
+
+
+def model_numbers(M, lg, e, swapped):
+    """Ledger Model margin (ledger home minus away) and total for an ESPN game, or None when a team has no rating."""
+    L = (M or {}).get("leagues", {}).get(model_league(lg) or "") or {}
+    R = L.get("ratings") or {}
+    if lg == "FCS" or not R:
+        return None
+    key = (lambda t: t.get("abbr")) if lg == "NFL" else (lambda t: str(t.get("id")))
+    h, a = R.get(key(e.get("home") or {})), R.get(key(e.get("away") or {}))
+    if not h or not a:
+        return None
+    st_ = L.get("state") or {}
+    hfa = 0.0 if e.get("neutral") else (st_.get("hfa") or 0.0)
+    m = h["r"] - a["r"] + hfa
+    t = 2 * (st_.get("lg") or 0) + h["o"] + a["o"] - h["d"] - a["d"]
+    return {"m": round(-m if swapped else m, 1), "t": round(t, 1), "v": (M or {}).get("updatedAt")}
+
+
+def prop_market(mk):
+    m = norm(mk)
+    if "(" in str(mk or "") or "alt" in m.split():
+        return None                       # alternate-line props have their own pricing; not modeled
+    for pre, key in PROP_MARKETS:
+        if m.startswith(pre):
+            return key
+    return None
+
+
+def prop_projection(P, prop):
+    """Model chance that the picked side of a prop wins (among non-pushes), from nflverse-based projections."""
+    mk = prop_market(prop.get("mk"))
+    if not P or not mk:
+        return None
+    cands = (P.get("players") or {}).get(pname(prop.get("pl")))
+    if not cands:
+        return None
+    tm = (prop.get("tm") or "").upper()
+    c = next((x for x in cands if x.get("team") == tm), None) or (cands[0] if len(cands) == 1 else None)
+    if not c or mk not in (c.get("m") or {}):
+        return None
+    mu = c["m"][mk]
+    side, ln = prop.get("side"), prop.get("ln")
+    if mk == "td" or side == "Y":
+        import math
+        lam = c["m"].get("td") if mk == "td" else None
+        if lam is None:
+            return None
+        p = 1 - math.exp(-lam) if side in ("Y", "O", None) else math.exp(-lam)
+        return {"mu": mu, "p": round(p, 4)}
+    a, b = (P.get("sd") or {}).get(mk, [None, None])
+    if a is None or ln is None or side not in ("O", "U"):
+        return {"mu": mu, "p": None}
+    sd = max(0.35 if mk in COUNT_MARKETS else 3.0, a + b * mu)
+    if mk in COUNT_MARKETS and float(ln).is_integer():
+        over, under = 1 - phi((ln + 0.5 - mu) / sd), phi((ln - 0.5 - mu) / sd)
+    else:
+        over = 1 - phi((ln - mu) / sd); under = 1 - over
+    win, lose = (over, under) if side == "O" else (under, over)
+    return {"mu": mu, "p": round(win / (win + lose), 4) if win + lose > 0 else None}
+
+
+def implied_from_text(odds):
+    """Price-implied chance of a prop (with a typical 4.5% two-way margin taken out); None without a sportsbook price."""
+    m = re.match(r"^\s*([+\-\u2212]\d{3,5})\b", str(odds or ""))
+    if not m:
+        return None
+    am = int(m.group(1).replace("\u2212", "-"))
+    if -100 < am < 100:
+        return None
+    ip = 100 / (am + 100) if am > 0 else -am / (-am + 100)
+    return round(min(0.98, max(0.02, ip / 1.045)), 4)
+
+
+def closing_chance(gl, books, pmfs, swapped_close=None):
+    """Chance the locked lean wins among non-pushes according to the closing market: the push table gives the shape,
+    the closing no-vig price at the closing number gives the level. None when it cannot be read."""
+    l = gl.get("lean") or {}
+    mk, side, ln = l.get("mk"), l.get("side"), l.get("ln")
+    if not books or ln is None or mk not in ("spread", "total") or not pmfs:
+        return None
+    import math
+
+    def novig(a, b):
+        def ip(x):
+            return 100 / (x + 100) if x > 0 else -x / (-x + 100)
+        if a is None or b is None or -100 < a < 100 or -100 < b < 100:
+            return None
+        return ip(a) / (ip(a) + ip(b))
+
+    def split(pmf, x):
+        above, below, at = pmf.get("hi", 0), pmf.get("lo", 0), 0
+        for i, q in enumerate(pmf["p"]):
+            n = pmf["n0"] + i
+            if n > x + 1e-9: above += q
+            elif n < x - 1e-9: below += q
+            else: at += q
+        tot = above + below + at
+        return (above / tot, at / tot, below / tot) if tot > 0 else None
+
+    if mk == "spread" and side in ("A", "H") and pmfs.get("m"):
+        fav = (gl.get("line") or {}).get("fav")
+        s_line = -ln if side == fav else ln                     # the side's own line
+        home_line = s_line if side == "H" else -s_line
+        ps, lines = [], []
+        for q in books.values():
+            hq, aq = (q.get("spread") or {}).get("H"), (q.get("spread") or {}).get("A")
+            if hq and aq and hq[0] is not None and aq[0] is not None and abs(hq[0] + aq[0]) < 1e-9:
+                p = novig(hq[1], aq[1])
+                if p is not None:
+                    ps.append(p); lines.append(hq[0])
+        if not ps:
+            return None
+        cl = median(lines); pc = median([p for p, x in zip(ps, lines) if x == cl])
+        sp_ = split(pmfs["m"], -home_line); sc_ = split(pmfs["m"], -cl)
+        if not sp_ or not sc_:
+            return None
+        ph = sp_[0] / (sp_[0] + sp_[2]) + (pc - sc_[0] / (sc_[0] + sc_[2]))
+        p = ph if side == "H" else 1 - ph
+        return {"p": round(min(0.995, max(0.005, p)), 4), "push": round(sp_[1], 4), "close": cl}
+    if mk == "total" and side in ("O", "U") and pmfs.get("t"):
+        ps, lines = [], []
+        for q in books.values():
+            o, u = (q.get("total") or {}).get("O"), (q.get("total") or {}).get("U")
+            if o and u and o[0] is not None and o[0] == u[0]:
+                p = novig(o[1], u[1])
+                if p is not None:
+                    ps.append(p); lines.append(o[0])
+        if not ps:
+            return None
+        cl = median(lines); pc = median([p for p, x in zip(ps, lines) if x == cl])
+        sp_ = split(pmfs["t"], ln); sc_ = split(pmfs["t"], cl)
+        if not sp_ or not sc_:
+            return None
+        po = sp_[0] / (sp_[0] + sp_[2]) + (pc - sc_[0] / (sc_[0] + sc_[2]))
+        p = po if side == "O" else 1 - po
+        return {"p": round(min(0.995, max(0.005, p)), 4), "push": round(sp_[1], 4), "close": cl}
+    return None
+
+
+def model_result(lm, close_hm, close_tot, sc):
+    """How the model's own side did against the closing line: [spread edge, W/L/P, total edge, W/L/P]."""
+    if not lm or not sc:
+        return None
+    out = [None, None, None, None]
+    if close_hm is not None and lm.get("m") is not None:
+        edge = lm["m"] - close_hm
+        d = (sc["h"] - sc["a"]) - close_hm
+        out[0], out[1] = round(edge, 1), (None if edge == 0 else wl(d if edge > 0 else -d))
+    if close_tot is not None and lm.get("t") is not None:
+        edge = lm["t"] - close_tot
+        d = sc["h"] + sc["a"] - close_tot
+        out[2], out[3] = round(edge, 1), (None if edge == 0 else wl(d if edge > 0 else -d))
+    return out
+
+
+def gates_summary(M, P):
+    """The small part of the model files the page needs: each gate's verdict and headline numbers."""
+    out = {}
+    for name, L in ((M or {}).get("leagues") or {}).items():
+        if "error" in L:
+            out[name] = {"error": L["error"]}
+            continue
+        g = lambda d: {k: d.get(k) for k in ("pass", "why", "a", "b", "scale", "w", "n_test", "gain", "t", "thr", "ats", "ll_market", "ll_model", "ll_blend") if k in d}
+        out[name] = {"spread": g(L.get("spread") or {}), "total": g(L.get("total") or {}), "ml": g(L.get("ml") or {}),
+                     "mae": L.get("mae"), "live": L.get("live"), "sigma": L.get("sigma"), "test": L.get("test"), "tune": L.get("tune"),
+                     "asof": (L.get("state") or {}).get("asof"), "stale": L.get("stale")}
+    meta = {"updatedAt": (M or {}).get("updatedAt"), "leagues": out}
+    if P:
+        meta["props"] = {"updatedAt": P.get("updatedAt"), "throughWeek": P.get("throughWeek"), "coverage": P.get("coverage")}
+    return meta
+
+
 def et_date(t):
     return t.astimezone(ET).date()
 
@@ -319,6 +551,8 @@ def main():
     ap.add_argument("--final", default=f"{RAW}/scores/final", help="season archive of finished games (URL or dir)")
     ap.add_argument("--pregame", action="store_true", help="also write pregame/<slate> (needs DIR/pregame/<slate>.json read first)")
     ap.add_argument("--now", default=None, help="ISO time to use instead of the clock (testing)")
+    ap.add_argument("--model", default=f"{RAW}/model/results/ledger_model.json", help="Ledger Model results (URL or path)")
+    ap.add_argument("--players", default=f"{RAW}/model/results/nfl_players.json", help="NFL prop projections (URL or path)")
     args = ap.parse_args()
     now = when(args.now) if args.now else dt.datetime.now(UTC)
     now_iso = now.astimezone(UTC).isoformat(timespec="seconds")
@@ -334,6 +568,19 @@ def main():
     by_id = {e["id"]: e for e in pool}
     feed_age = (now - when(feed.get("updatedAt"))).total_seconds() / 60 if feed.get("updatedAt") else None
     checked = feed.get("checkedAt") or feed.get("updatedAt")
+    M = P = None
+    if args.pregame:
+        for name in ("model", "players"):
+            try:
+                v = load(getattr(args, name))
+            except Exception as ex:
+                print(f"{name} file unavailable: {ex}", file=sys.stderr)
+                v = None
+            if name == "model":
+                M = v
+            else:
+                P = v
+    gates = gates_summary(M, P) if M or P else None
 
     # games older than the live feed's window come from the season archive (one file per US Eastern date)
     doc_paths = sorted(glob.glob(os.path.join(args.docs, "slates", "*", "leagues", "*.json")))
@@ -395,12 +642,32 @@ def main():
                 last = {k: v for k, v in (old_snaps[-1] if old_snaps else {}).items() if k != "at"}
                 if snap != last:
                     pg["snaps"][gid] = old_snaps + [dict(snap, at=now_iso)]
-            if e and (e.get("quotes") or e.get("qopen") or e.get("qclose")):
+            old_ent = (pg["_old"].get("games") or {}).get(gid) or {}
+            if e and (e.get("quotes") or e.get("qopen") or e.get("qclose") or (args.pregame and ko > now and (M or P))):
                 ent = {"state": e.get("state"), "quotes": e.get("quotes") if e.get("state") == "pre" else None,
                        "open": e.get("qopen"), "close": e.get("qclose")}
                 if swapped:
                     ent = {k: swap_quotes(v) if k != "state" else v for k, v in ent.items()}
-                if ((pg["_old"].get("games") or {}).get(gid)) != ent:
+                if ko > now and (M or P):
+                    # numbers that only make sense before kickoff; after it, the last ones stay as they were
+                    close_e = e.get("close")
+                    if close_e and swapped:
+                        close_e = dict(close_e, hm=-close_e["hm"] if close_e.get("hm") is not None else None)
+                    hm, tot = market_numbers(ent.get("quotes") or ent.get("close") or ent.get("open"), close_e, g.get("line"))
+                    push = ((M or {}).get("leagues", {}).get(model_league(g["lg"]) or "") or {}).get("push") or {}
+                    pm = {"m": pmf_row(push.get("margin"), hm), "t": pmf_row(push.get("total"), tot)}
+                    if pm["m"] or pm["t"]:
+                        ent["pmf"] = pm
+                    lm = model_numbers(M, g["lg"], e, swapped)
+                    if lm:
+                        ent["lm"] = lm
+                    if g["lg"] == "NFL" and P and props:
+                        ent["pp"] = [prop_projection(P, p) for p in props]
+                else:
+                    for k in ("pmf", "lm", "pp"):
+                        if old_ent.get(k) is not None:
+                            ent[k] = old_ent[k]
+                if old_ent != ent:
                     pg["games"][gid] = ent
             if ko > now + dt.timedelta(hours=1):
                 continue
@@ -428,6 +695,11 @@ def main():
                     before = [x for x in old_snaps if when(x.get("at")) and when(x["at"]) <= ko]
                     if before:
                         lock["pre"] = before[-1]["at"]
+                pre_ent = pg["games"].get(gid) or old_ent
+                if not late and pre_ent.get("lm"):
+                    lock["lm"] = pre_ent["lm"]                       # what the model said before kickoff
+                if not late and pre_ent.get("pp"):
+                    lock["pp"] = [(x or {}).get("p") for x in pre_ent["pp"]][:len(lock["props"])]
                 ch["lock"] = lock
                 n_lock += 1
             if lock:
@@ -436,9 +708,16 @@ def main():
                     ch["lockdiff"] = diff
             gl = dict(g, line=lock["line"], lean=lock["lean"], star=lock["star"]) if lock else g
             lprops = lock["props"] if lock else [{k: p.get(k) for k in ("pl", "mk", "ln", "side")} for p in props]
-            if state in ("in", "post") and g.get("tracked") and g.get("clv") is None:
-                cv = clv_of(gl, e.get("close"), swapped)
-                if cv is not None:
+            if state in ("in", "post") and g.get("tracked") and (g.get("clv") is None or ("p" not in (g.get("clv") or {}) and not g.get("clvp"))):
+                cv = g.get("clv") or clv_of(gl, e.get("close"), swapped)
+                pre_ent = pg["games"].get(gid) or old_ent
+                cbooks = e.get("qclose")
+                if cbooks and swapped:
+                    cbooks = swap_quotes(cbooks)
+                cc = closing_chance(gl, cbooks, pre_ent.get("pmf")) if not (lock or {}).get("late") else None
+                if cc is not None:
+                    cv = dict(cv or {}, p=cc["p"], push=cc["push"])
+                if cv is not None and cv != g.get("clv"):
                     ch["clv"] = cv
             if state == "pre" or ea.get("score") is None or eh.get("score") is None:
                 if e.get("status") in ("STATUS_POSTPONED", "STATUS_CANCELED", "STATUS_DELAYED") and g.get("clk") != e.get("detail"):
@@ -505,7 +784,26 @@ def main():
                                         "conf": l.get("conf"), "mk": l.get("mk"), "props": cnt, "locked": bool(lock)}
                         cv = ch.get("clv") or g.get("clv")
                         if cv:
-                            results[gid]["clv"] = cv.get("pts")
+                            if cv.get("pts") is not None:
+                                results[gid]["clv"] = cv.get("pts")
+                            if cv.get("p") is not None:
+                                results[gid]["cp"] = cv["p"]
+                        if lock and lock.get("lm"):
+                            cl = e.get("close") or {}
+                            chm = cl.get("hm")
+                            if chm is not None and swapped:
+                                chm = -chm
+                            mr = model_result(lock["lm"], chm, cl.get("tot"), sc)
+                            if mr:
+                                results[gid]["lme"] = mr
+                        if lock and lock.get("pp"):
+                            rows = []
+                            for i, pp_ in enumerate(lock["pp"]):
+                                if pp_ is None or i >= len(pgr) or pgr[i] not in ("W", "L"):
+                                    continue
+                                rows.append([pp_, 1 if pgr[i] == "W" else 0, implied_from_text((lprops[i] if i < len(lprops) else {}).get("odds"))])
+                            if rows:
+                                results[gid]["pp"] = rows
             else:
                 if g.get("clk") != e.get("detail"):
                     ch["clk"] = e.get("detail")
@@ -518,10 +816,30 @@ def main():
             results_by_slate.setdefault(slate, {}).update(results)
 
     for slate, pg in pregame.items():
-        if not args.pregame or (not pg["games"] and not pg["snaps"]):
+        if not args.pregame:
+            continue
+        # price coverage for the slate's tracked games (Phase 2 gate)
+        tracked = priced = 0
+        all_ent = dict(pg["_old"].get("games") or {}); all_ent.update(pg["games"])
+        for path in doc_paths:
+            if path.split(os.sep)[-3] != slate:
+                continue
+            for gid, g in ((load(path) or {}).get("games") or {}).items():
+                if g.get("tracked"):
+                    tracked += 1
+                    en = all_ent.get(gid) or {}
+                    if en.get("close") or en.get("quotes"):
+                        priced += 1
+        cov = {"tracked": tracked, "priced": priced}
+        extra = {}
+        if cov != pg["_old"].get("coverage"):
+            extra["coverage"] = cov
+        if gates and gates != pg["_old"].get("gates"):
+            extra["gates"] = gates
+        if not pg["games"] and not pg["snaps"] and not extra:
             continue
         exists = os.path.exists(os.path.join(args.docs, "pregame", f"{slate}.json"))
-        body = {"slate": slate, "updatedAt": now_iso, "feedCheckedAt": checked, "games": pg["games"], "snaps": pg["snaps"]}
+        body = dict({"slate": slate, "updatedAt": now_iso, "feedCheckedAt": checked, "games": pg["games"], "snaps": pg["snaps"]}, **extra)
         f = _write(args.out, f"{slate}__pregame.json", body)
         manifest.append({"op": "update" if exists else "set", "collection": "pregame", "doc_id": slate, "file_path": f})
 

@@ -92,8 +92,8 @@
   }
 
   /* ---------- value verdicts ----------
-     input: { pMkt (no-vig market probability), dec (price), priceKind ('quote' | 'fair' | 'none'), fresh (bool),
-              evidence: {w, l, label} | null, needsNews (bool), pPush }
+     input: { pMkt (no-vig market probability among bets that do not push), dec (price), priceKind ('quote' | 'fair' | 'none'),
+              fresh (bool), evidence: {w, l, label} | null, needsNews (bool), pPush (chance of landing on the number) }
      verdict: 'value'      positive expected value from an actual, fresh quote AND a measured record behind it
                            (posterior chance of beating break-even >= minProb, at least minN graded picks)
               'possible'   positive estimate but the evidence is too thin to call it value
@@ -117,7 +117,9 @@
     if (p >= rules.highChance) out.labels.push('high-chance');
     if (x.am != null && x.am >= rules.longShotAm) out.labels.push('long-shot');
     if (x.priceKind !== 'quote' || !dec || !x.fresh) return out;
-    out.ev = ev(p, dec, x.pPush || 0);
+    const pPush = isNum(x.pPush) && x.pPush > 0 && x.pPush < 1 ? x.pPush : 0;
+    out.pPush = pPush;
+    out.ev = ev(p*(1 - pPush), dec, pPush);   // p is the chance among bets that do not push; a push returns the stake
     if (x.needsNews) out.reasons.push('Depends on unconfirmed player news.');
     if (out.ev > 0 && out.pBeat != null && out.pBeat >= rules.minProb && out.n >= rules.minN && !x.needsNews){ out.verdict = 'value'; out.labels.push('value'); }
     else if (out.ev > 0){ out.verdict = 'possible'; out.reasons.push(out.n ? `Only ${out.n} graded picks behind this kind of bet (${Math.round((out.pBeat||0)*100)}% chance it beats break-even).` : 'No measured record behind it.'); }
@@ -209,6 +211,103 @@
     return { ev: p*dec - 1, p, dec, reason:'Assumes the games are independent of each other.' };
   }
 
+  /* ---------- the number a game lands on (Phase 2) ----------
+     A pmf slice from the robot: {n0, p:[...], lo, hi}: P(outcome = n) for whole numbers n0.. plus the mass below and
+     above. The outcome is the home margin (spreads) or the total (totals), given the market's closing number. */
+  function pmfSplit(pmf, x){
+    if (!pmf || !Array.isArray(pmf.p) || !isNum(pmf.n0) || !isNum(x)) return null;
+    let above = pmf.hi || 0, below = pmf.lo || 0, at = 0;
+    pmf.p.forEach((q, i) => { const n = pmf.n0 + i; if (n > x + 1e-9) above += q; else if (n < x - 1e-9) below += q; else at += q; });
+    const tot = above + below + at;
+    return tot > 0 ? { above: above/tot, at: at/tot, below: below/tot } : null;
+  }
+  // Win / push / lose for one selection at its own line. Spread: sel 'H' or 'A' with that side's line (e.g. H -3.5);
+  // the home side covers when margin > -line. Total: sel 'O' or 'U' at the total.
+  function lineSplit(pmf, market, sel, line){
+    if (!isNum(line)) return null;
+    if (market === 'spread'){
+      const homeLine = sel === 'H' ? line : -line, s = pmfSplit(pmf, -homeLine); if (!s) return null;
+      return sel === 'H' ? { win: s.above, push: s.at, lose: s.below } : { win: s.below, push: s.at, lose: s.above };
+    }
+    if (market === 'total'){
+      const s = pmfSplit(pmf, line); if (!s) return null;
+      return sel === 'O' ? { win: s.above, push: s.at, lose: s.below } : { win: s.below, push: s.at, lose: s.above };
+    }
+    return null;
+  }
+  // Chance among non-pushes at `line`, anchored to the no-vig price at the market's own line (the pmf gives the shape,
+  // the price gives the level). Used for alternate lines and to read a pick's chance from the closing market.
+  function chanceAt(pmf, market, sel, line, anchorLine, anchorP){
+    const at = lineSplit(pmf, market, sel, line); if (!at || at.win + at.lose <= 0) return null;
+    let p = at.win/(at.win + at.lose);
+    if (isNum(anchorLine) && isNum(anchorP)){
+      const an = lineSplit(pmf, market, sel, anchorLine);
+      if (an && an.win + an.lose > 0) p += anchorP - an.win/(an.win + an.lose);
+    }
+    return { p: Math.min(0.995, Math.max(0.005, p)), push: at.push };
+  }
+
+  /* ---------- model blend (Phases 3 and 4) ----------
+     The gates come from the Ledger Model backtest. A failed gate leaves the market untouched. */
+  const sig = z => 1/(1 + Math.exp(-Math.max(-35, Math.min(35, z))));
+  const logit = p => { const q = Math.min(1 - 1e-9, Math.max(1e-9, p)); return Math.log(q/(1 - q)); };
+  // edgePts: model minus market, in points, from the selected side (home margin edge for H, -edge for A; total edge for O)
+  function blendCover(pMkt, edgePts, gate){
+    if (!gate?.pass || !isNum(pMkt) || !isNum(edgePts) || !isNum(gate.b) || !isNum(gate.scale) || gate.scale <= 0) return pMkt;
+    return sig(logit(pMkt) + (gate.a || 0) + gate.b*edgePts/gate.scale);
+  }
+  function blendMl(pMkt, pModel, gate){
+    if (!gate?.pass || !isNum(pMkt) || !isNum(pModel) || !Array.isArray(gate.w)) return pMkt;
+    return sig(gate.w[0] + gate.w[1]*logit(pMkt) + gate.w[2]*logit(pModel));
+  }
+  // model margin -> chance the home side wins outright (normal around the margin)
+  function erf(x){ const t = 1/(1 + 0.3275911*Math.abs(x)); const y = 1 - (((((1.061405429*t - 1.453152027)*t) + 1.421413741)*t - 0.284496736)*t + 0.254829592)*t*Math.exp(-x*x); return x >= 0 ? y : -y; }
+  const normCdf = z => 0.5*(1 + erf(z/Math.SQRT2));
+  /* Calibration gate for model chances (props): rows [[p, y, base]], y = 1 win / 0 loss, base = the chance to beat
+     (price-implied when there was a price, else 0.5). Passes with at least minN rows and a Brier-score gain with t >= minT. */
+  function calibrationGate(rows, minN = 300, minT = 2){
+    const xs = (rows || []).filter(r => isNum(r[0]) && (r[1] === 0 || r[1] === 1));
+    const n = xs.length;
+    if (!n) return { n:0, pass:false, gain:null, t:null, brier:null, base:null };
+    const d = xs.map(([p, y, b]) => ((isNum(b) ? b : 0.5) - y)**2 - (p - y)**2);
+    const mean = d.reduce((s, v) => s + v, 0)/n, sd = Math.sqrt(d.reduce((s, v) => s + (v - mean)**2, 0)/n);
+    const t = sd > 0 ? mean/(sd/Math.sqrt(n)) : null;
+    const brier = xs.reduce((s, [p, y]) => s + (p - y)**2, 0)/n, base = xs.reduce((s, [p, y, b]) => s + ((isNum(b) ? b : 0.5) - y)**2, 0)/n;
+    return { n, gain: mean, t, brier, base, pass: n >= minN && mean > 0 && t != null && t >= minT };
+  }
+
+  /* ---------- bankroll (Phase 5) ---------- */
+  /* Fractional Kelly with pushes, capped at one unit. p = chance among non-pushes. Returns a stake rounded down to `step`;
+     0 with a reason when there is no edge or the stake would be under `min`. */
+  function kellyStake({ p, dec, pPush = 0, bankroll, unit, frac = 0.25, min = 1, step = 0.5 }){
+    if (!isNum(p) || !isNum(dec) || dec <= 1 || !isNum(bankroll) || bankroll <= 0) return { stake:0, f:0, reason:'No chance or price to size it with.' };
+    const b = dec - 1, pw = p*(1 - (pPush || 0)), pl = (1 - p)*(1 - (pPush || 0));
+    const f = (pw*b - pl)/b;
+    if (!(f > 0)) return { stake:0, f, reason:'No edge, so no stake.' };
+    let raw = frac*f*bankroll, capped = false;
+    if (isNum(unit) && unit > 0 && raw > unit){ raw = unit; capped = true; }
+    const stake = Math.floor(raw/step + 1e-9)*step;
+    if (stake < min) return { stake:0, f, reason:`The edge supports less than $${min}.` };
+    return { stake, f, capped, reason: capped ? 'Capped at one unit.' : `${Math.round(frac*100)}% of the Kelly stake.` };
+  }
+  // Bankroll path from settled profits in time order: current, peak and drawdown from the peak.
+  function bankrollPath(start, profits){
+    let cur = start, peak = start, dd = 0, ddPct = 0;
+    for (const p of profits){ cur += p; peak = Math.max(peak, cur); if (peak - cur > dd){ dd = peak - cur; ddPct = peak > 0 ? dd/peak : 0; } }
+    return { cur, peak, dd: peak - cur, ddPct: peak > 0 ? (peak - cur)/peak : 0, maxDd: dd, maxDdPct: ddPct };
+  }
+  // Wins, losses, pushes, amount staked and profit for a list of settled items {state, stake, profit}
+  function summarize(items){
+    const o = { n:0, W:0, L:0, P:0, staked:0, profit:0, open:0 };
+    for (const it of items || []){
+      const st = it.state ? String(it.state).replace('*', '') : null;
+      if (st === 'W' || st === 'L' || st === 'P' || st === 'V'){ o.n++; o[st === 'V' ? 'P' : st]++; o.staked += it.stake || 0; o.profit += it.profit || 0; }
+      else o.open++;
+    }
+    o.roi = o.staked ? o.profit/o.staked : null;
+    return o;
+  }
+
   /* ---------- records ---------- */
   function units(rec, am = -110){
     const d = amToDec(am); return rec.W*(d - 1) - rec.L;
@@ -221,7 +320,8 @@
   }
 
   const api = { isNum, amToDec, decToAm, impliedProb, fairAm, parsePrice, devig2, ev, breakEven, wilson, betaCdf, posterior,
-    RULES, evaluate, bestQuote, marketProb, fresh, settleStraight, settleParlay, settlePowerPlay, parlayEval, units, maxDrawdown, lgamma };
+    RULES, evaluate, bestQuote, marketProb, fresh, settleStraight, settleParlay, settlePowerPlay, parlayEval, units, maxDrawdown, lgamma,
+    pmfSplit, lineSplit, chanceAt, sig, logit, blendCover, blendMl, normCdf, calibrationGate, kellyStake, bankrollPath, summarize };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.LedgerCore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

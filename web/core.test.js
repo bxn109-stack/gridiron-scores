@@ -180,3 +180,68 @@ test('units and drawdown', () => {
   assert.equal(C.maxDrawdown([1, -1, -1, -1, 2, -3]), 4);
   assert.equal(C.maxDrawdown([]), 0);
 });
+
+/* ---------- Phase 2: landing on the number ---------- */
+// toy pmf: margins -1..4 with mass below/above
+const PMF = { n0: -1, p: [0.05, 0.02, 0.08, 0.06, 0.15, 0.04], lo: 0.30, hi: 0.30 };
+test('push chances come from the pmf and sum to one', () => {
+  const s = C.pmfSplit(PMF, 3);
+  close(s.at, 0.15); close(s.above, 0.04 + 0.30); close(s.at + s.above + s.below, 1);
+  assert.equal(C.pmfSplit(PMF, 3.5).at, 0);
+  assert.equal(C.pmfSplit(null, 3), null);
+});
+test('spread and total splits read the right side', () => {
+  const h = C.lineSplit(PMF, 'spread', 'H', -3);        // home -3: covers when margin > 3
+  close(h.win, 0.34); close(h.push, 0.15);
+  const a = C.lineSplit(PMF, 'spread', 'A', 3);         // away +3: wins when margin < 3
+  close(a.win, h.lose); close(a.push, h.push);
+  const o = C.lineSplit({ n0: 44, p: [0.05, 0.04], lo: 0.5, hi: 0.41 }, 'total', 'O', 44);
+  close(o.win, 0.45); close(o.push, 0.05);
+});
+test('a chance at another line is anchored to the market price', () => {
+  const plain = C.chanceAt(PMF, 'spread', 'H', -3);
+  const anchored = C.chanceAt(PMF, 'spread', 'H', -3, -3, plain.p + 0.03);
+  close(anchored.p, plain.p + 0.03);
+  close(anchored.push, 0.15);
+});
+test('expected value counts the push as a refund', () => {
+  const d = C.amToDec(-110);
+  const noPush = C.evaluate({ pMkt: 0.55, dec: d, priceKind: 'quote', fresh: true });
+  const push = C.evaluate({ pMkt: 0.55, dec: d, priceKind: 'quote', fresh: true, pPush: 0.1 });
+  close(noPush.ev, 0.55*(d - 1) - 0.45);
+  close(push.ev, 0.9*noPush.ev);                         // a push removes 10% of the bets from both sides
+  assert.equal(push.pPush, 0.1);
+});
+
+/* ---------- Phases 3-4: a model moves the market only after its gate ---------- */
+test('a failed gate leaves the market untouched', () => {
+  assert.equal(C.blendCover(0.5, 4, { pass: false, a: 0, b: 0.3, scale: 3 }), 0.5);
+  assert.equal(C.blendMl(0.6, 0.7, { pass: false, w: [0, 1, 0.5] }), 0.6);
+  const moved = C.blendCover(0.5, 3, { pass: true, a: 0, b: 0.2, scale: 3 });
+  assert.ok(moved > 0.54 && moved < 0.56);
+  close(C.blendMl(0.6, 0.6, { pass: true, w: [0, 1, 0] }), 0.6);
+});
+test('calibration gate needs enough rows and a real gain', () => {
+  const good = []; for (let i = 0; i < 400; i++){ const y = i % 10 < 7 ? 1 : 0; good.push([0.7, y, 0.5]); }
+  const g = C.calibrationGate(good); assert.ok(g.pass); assert.ok(g.gain > 0);
+  assert.equal(C.calibrationGate(good.slice(0, 100)).pass, false);   // too few
+  const bad = good.map(([p, y]) => [0.3, y, 0.5]);
+  assert.equal(C.calibrationGate(bad).pass, false);
+});
+
+/* ---------- Phase 5: bankroll ---------- */
+test('Kelly stake is fractional, capped at a unit and zero without an edge', () => {
+  const d = C.amToDec(-110);
+  assert.equal(C.kellyStake({ p: 0.5, dec: d, bankroll: 200, unit: 5 }).stake, 0);
+  const s = C.kellyStake({ p: 0.55, dec: d, bankroll: 200, unit: 5 });   // f* = 0.055, quarter = 1.375% of 200 = 2.75
+  assert.equal(s.stake, 2.5); assert.equal(s.capped, false);
+  const big = C.kellyStake({ p: 0.7, dec: 2, bankroll: 200, unit: 5 });
+  assert.equal(big.stake, 5); assert.equal(big.capped, true);
+  assert.equal(C.kellyStake({ p: 0.53, dec: d, bankroll: 200, unit: 5 }).stake, 0);   // supports under $1
+});
+test('bankroll path tracks the drawdown from the peak', () => {
+  const b = C.bankrollPath(200, [10, -5, -20, 5]);
+  close(b.cur, 190); close(b.peak, 210); close(b.dd, 20); close(b.maxDd, 25);
+  const s = C.summarize([{ state:'W', stake:5, profit:4.55 }, { state:'L', stake:5, profit:-5 }, { state:'W*', stake:5, profit:2 }, { state:'V', stake:5, profit:0 }, { state:null, stake:5 }]);
+  assert.deepEqual([s.n, s.W, s.L, s.P, s.open], [4, 2, 1, 1, 1]); close(s.profit, 1.55); close(s.staked, 20);
+});

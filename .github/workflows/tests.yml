@@ -3,7 +3,7 @@ name: Tests
 on:
   push:
     branches: [main]
-    paths: ["*.py", "tests/**", "web/**", ".github/workflows/tests.yml"]
+    paths: ["*.py", "model/*.py", "tests/**", "web/**", ".github/workflows/tests.yml"]
   pull_request:
   workflow_dispatch:
 
