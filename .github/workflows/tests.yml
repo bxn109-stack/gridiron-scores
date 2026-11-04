@@ -19,4 +19,4 @@ jobs:
       - name: Python tests (robot, odds adapters, grader)
         run: python3 -W error::ResourceWarning -m unittest discover -s tests -v
       - name: JavaScript tests (betting math used by the page)
-        run: if [ -d web ]; then node --test web/; else echo "no web tests yet"; fi
+        run: node --test web/*.test.js
