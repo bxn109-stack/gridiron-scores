@@ -12,7 +12,11 @@ A small robot for Barry's Gridiron Ledger picks page.
 - **`web/ledger-core.js`** is the betting math the page uses (no-vig probabilities, expected value with pushes, value verdicts, straight/parlay/PrizePicks settlement), kept here so it is tested (`node --test web/*.test.js`). The page itself is not in this repository.
 - **`tests/`** has the Python tests (`python3 -m unittest discover -s tests`); the Tests workflow runs them and the JavaScript tests on every push.
 
-- **`model/`** holds backtests of home-made college models against past betting lines, using College Football Data (the API key is a repository secret; raw downloads stay in the Actions cache). Summaries land in `model/results/`.
+- **`model/`** holds the models, rerun by the Model backtest workflow on every change and on Tuesday and Friday mornings:
+  - `ledger_model.py`: the Ledger Model, walk-forward points ratings for the NFL (nflverse) and college (College Football Data; the key is a repository secret). Settings are tuned on early seasons and scored on later ones; each market has a gate (log-loss gain over the closing line with t ≥ 2 and 52.4%+ in each of the last two test seasons) and gets no weight unless it passes. It also writes the push tables (how often games land on each number, given the closing spread or total) and current team ratings.
+  - `nfl_props.py`: NFL player projections from nflverse weekly stats. Prop chances stay off on the page until locked projections beat the price-implied chance on 300+ graded props.
+  - `cfb_backtest.py`, `cfb_eff.py`: earlier college backtests, kept for reference.
+  - Results land in `model/results/` (aggregate numbers and ratings only; raw downloads stay in the Actions cache).
 
 Only public game data lives here. No picks, no bets, no personal data.
 
