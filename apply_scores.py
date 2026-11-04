@@ -9,7 +9,11 @@ DIR holds league docs saved by ArtifactData (out_dir): DIR/slates/<slate>/league
 and optionally DIR/results/<slate>.json. The script:
   - matches each started ledger game to its ESPN game (saves the ESPN id as `eid` for next time),
   - writes st / sc / clk, and on final also per (quarter scores) and pv (prop results),
-  - grades tracked games (su, lean, star, props) exactly as the runbook says,
+  - grades tracked games (su, lean, star, props) exactly as the runbook says, from a pick snapshot (`lock`) taken the
+    first time the game is seen after kickoff, so later edits cannot change a graded pick,
+  - reads the season archive (scores/final/<date>.json) for games older than the live feed's 4-day window,
+  - voids a prop when the player is missing from a final box score a day after the game (did not play),
+  - writes pregame/<slate>: sportsbook quotes (current, opening, closing) and an append-only history of the picks,
   - writes one update file per changed doc plus meta/live, and prints a JSON manifest:
       [{"op": "update"|"set", "collection": ..., "doc_id": ..., "file_path": ...}, ...]
 Never changes line, lean, star, props or tracked.
@@ -24,10 +28,13 @@ import sys
 import time
 import unicodedata
 import urllib.request
+from zoneinfo import ZoneInfo
 
 RAW = "https://raw.githubusercontent.com/bxn109-stack/gridiron-scores/main"
 UTC = dt.timezone.utc
+ET = ZoneInfo("America/New_York")
 COLLEGE = {"FBS", "FCS"}
+VOID_AFTER = dt.timedelta(hours=30)   # a prop is voided only once the box score has had a day to settle
 
 
 # ---------- loading ----------
@@ -253,13 +260,47 @@ def finished(g):
         return False
     props = g.get("props") or []
     pv = g.get("pv") or []
-    if props and (len(pv) < len(props) or None in pv):
-        return False
+    pgr = (g.get("gr") or {}).get("props") or []
+    if props:
+        for i in range(len(props)):
+            done_res = i < len(pgr) and pgr[i] in ("V", "X")
+            if not done_res and (i >= len(pv) or pv[i] is None):
+                return False
     if g.get("tracked"):
         gr = g.get("gr")
         if not gr or (props and None in (gr.get("props") or [None])):
             return False
     return True
+
+
+# ---------- pick locks and pregame history ----------
+def pick_snapshot(g):
+    """The parts of a game that make up the pick. Compared and stored as-is (no derived numbers)."""
+    return {"line": g.get("line"), "lean": g.get("lean"), "star": bool(g.get("star")),
+            "props": [{k: p.get(k) for k in ("pl", "mk", "ln", "side", "odds")} for p in (g.get("props") or [])]}
+
+
+def lock_diff(g, lock):
+    cur = pick_snapshot(g)
+    return [k for k in ("line", "lean", "star", "props") if cur.get(k) != lock.get(k)]
+
+
+def swap_quotes(q):
+    """Book quotes written for ESPN's home/away -> the ledger's orientation when the two are reversed."""
+    if not isinstance(q, dict):
+        return q
+    out = {}
+    for b, v in q.items():
+        v = dict(v)
+        for mk in ("ml", "spread"):
+            if isinstance(v.get(mk), dict):
+                v[mk] = {{"A": "H", "H": "A"}.get(s, s): x for s, x in v[mk].items()}
+        out[b] = v
+    return out
+
+
+def et_date(t):
+    return t.astimezone(ET).date()
 
 
 # ---------- main ----------
@@ -269,6 +310,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--scores", default=f"{RAW}/scores/latest.json")
     ap.add_argument("--box", default=f"{RAW}/box")
+    ap.add_argument("--final", default=f"{RAW}/scores/final", help="season archive of finished games (URL or dir)")
+    ap.add_argument("--pregame", action="store_true", help="also write pregame/<slate> (needs DIR/pregame/<slate>.json read first)")
     ap.add_argument("--now", default=None, help="ISO time to use instead of the clock (testing)")
     args = ap.parse_args()
     now = when(args.now) if args.now else dt.datetime.now(UTC)
@@ -276,14 +319,37 @@ def main():
     os.makedirs(args.out, exist_ok=True)
 
     feed = load(args.scores)
-    if not feed or not feed.get("games"):
+    if not feed or not isinstance(feed.get("games"), list):
         live = {"ranAt": now_iso, "updated": 0, "graded": 0, "note": "The score feed is empty or unreachable right now. Nothing changed."}
         _write(args.out, "live.json", live)
         print(json.dumps([{"op": "set", "collection": "meta", "doc_id": "live", "file_path": os.path.join(args.out, "live.json")}]))
         return
-    pool = feed["games"]
+    pool = list(feed["games"])
     by_id = {e["id"]: e for e in pool}
     feed_age = (now - when(feed.get("updatedAt"))).total_seconds() / 60 if feed.get("updatedAt") else None
+    checked = feed.get("checkedAt") or feed.get("updatedAt")
+
+    # games older than the live feed's window come from the season archive (one file per US Eastern date)
+    doc_paths = sorted(glob.glob(os.path.join(args.docs, "slates", "*", "leagues", "*.json")))
+    window_lo = et_date(now) - dt.timedelta(days=3)
+    need = set()
+    for path in doc_paths:
+        for g in ((load(path) or {}).get("games") or {}).values():
+            ko = when(g.get("ko"))
+            if ko and ko <= now and not finished(g) and et_date(ko) < window_lo:
+                need |= {et_date(ko) + dt.timedelta(days=k) for k in (-1, 0, 1)}
+    arch_n = 0
+    for d in sorted(need):
+        src = f"{args.final}/{d.isoformat()}.json" if re.match(r"https?://", args.final) else os.path.join(args.final, f"{d.isoformat()}.json")
+        try:
+            arch = load(src) or {}
+        except Exception:
+            arch = {}
+        for e in (arch.get("games") or {}).values():
+            if e.get("id") and e["id"] not in by_id:
+                pool.append(e)
+                by_id[e["id"]] = e
+                arch_n += 1
 
     box_cache = {}
 
@@ -297,14 +363,16 @@ def main():
         return box_cache[eid]
 
     manifest, n_upd, n_grade, unmatched, prop_gaps, results_by_slate = [], 0, 0, [], 0, {}
-    for path in sorted(glob.glob(os.path.join(args.docs, "slates", "*", "leagues", "*.json"))):
+    n_lock, n_void, pregame = 0, 0, {}
+    for path in doc_paths:
         slate, lgname = path.split(os.sep)[-3], os.path.basename(path)[:-5]
         doc = load(path) or {}
         games = doc.get("games") or {}
         changes, results = {}, {}
+        pg = pregame.setdefault(slate, {"games": {}, "snaps": {}, "_old": load(os.path.join(args.docs, "pregame", f"{slate}.json")) or {}})
         for gid, g in games.items():
             ko = when(g.get("ko"))
-            if not ko or ko > now + dt.timedelta(hours=1) or ko < now - dt.timedelta(days=3):
+            if not ko:
                 continue
             gr = g.get("gr") or {}
             props = g.get("props") or []
@@ -314,10 +382,26 @@ def main():
             swapped = bool(g.get("eswap"))
             if not e:
                 e, swapped = match(g, pool)
-                if not e:
-                    if ko < now - dt.timedelta(minutes=20):
-                        unmatched.append(f"{g['a']['n']} @ {g['h']['n']}")
-                    continue
+            # pregame record: quotes from the feed and an append-only history of the pick before kickoff
+            old_snaps = list(((pg["_old"].get("snaps") or {}).get(gid)) or [])
+            if ko > now:
+                snap = pick_snapshot(g)
+                last = {k: v for k, v in (old_snaps[-1] if old_snaps else {}).items() if k != "at"}
+                if snap != last:
+                    pg["snaps"][gid] = old_snaps + [dict(snap, at=now_iso)]
+            if e and (e.get("quotes") or e.get("qopen") or e.get("qclose")):
+                ent = {"state": e.get("state"), "quotes": e.get("quotes") if e.get("state") == "pre" else None,
+                       "open": e.get("qopen"), "close": e.get("qclose")}
+                if swapped:
+                    ent = {k: swap_quotes(v) if k != "state" else v for k, v in ent.items()}
+                if ((pg["_old"].get("games") or {}).get(gid)) != ent:
+                    pg["games"][gid] = ent
+            if ko > now + dt.timedelta(hours=1):
+                continue
+            if not e:
+                if ko < now - dt.timedelta(minutes=20):
+                    unmatched.append(f"{g['a']['n']} @ {g['h']['n']}")
+                continue
             ea, eh = (e["home"], e["away"]) if swapped else (e["away"], e["home"])
             ch = {}
             if g.get("eid") != e["id"]:
@@ -325,8 +409,24 @@ def main():
                 if swapped:
                     ch["eswap"] = True
             state = e.get("state")
+            # lock the pick the first time the game is seen after kickoff; grading uses the lock from then on
+            lock = g.get("lock")
+            if not lock and g.get("tracked") and (ko <= now or state in ("in", "post")):
+                lock = dict(pick_snapshot(g), at=now_iso, src="first score update after kickoff")
+                if old_snaps:
+                    before = [x for x in old_snaps if when(x.get("at")) and when(x["at"]) <= ko]
+                    if before:
+                        lock["pre"] = before[-1]["at"]
+                ch["lock"] = lock
+                n_lock += 1
+            if lock:
+                diff = lock_diff(g, lock)
+                if diff != (g.get("lockdiff") or []):
+                    ch["lockdiff"] = diff
+            gl = dict(g, line=lock["line"], lean=lock["lean"], star=lock["star"]) if lock else g
+            lprops = lock["props"] if lock else [{k: p.get(k) for k in ("pl", "mk", "ln", "side")} for p in props]
             if state in ("in", "post") and g.get("tracked") and g.get("clv") is None:
-                cv = clv_of(g, e.get("close"), swapped)
+                cv = clv_of(gl, e.get("close"), swapped)
                 if cv is not None:
                     ch["clv"] = cv
             if state == "pre" or ea.get("score") is None or eh.get("score") is None:
@@ -357,31 +457,38 @@ def main():
                 pgr = list(gr.get("props") or [None] * len(props))
                 pgr += [None] * (len(props) - len(pgr))
                 for i, p in enumerate(props):
-                    if players:
-                        pl = find_player(p.get("pl"), players)
-                        v = stat_for(p.get("mk"), pl) if pl else None
+                    if i >= len(lprops):          # added after the lock: shown, never graded
+                        pgr[i] = "X"
+                        continue
+                    lp = lprops[i]
+                    pl = find_player(lp.get("pl"), players) if players else None
+                    if pl:
+                        v = stat_for(lp.get("mk"), pl)
                         if v is not None:
                             pv[i] = v
                     if pgr[i] is None:
-                        pgr[i] = grade_ou(pv[i], p.get("ln"), p.get("side"))
+                        pgr[i] = grade_ou(pv[i], lp.get("ln"), lp.get("side"))
+                    if pgr[i] is None and players and not pl and now - ko > VOID_AFTER:
+                        pgr[i] = "V"              # not in the final box score a day later: did not play (books void these)
+                        n_void += 1
                     if pgr[i] is None:
                         prop_gaps += 1
                 if props and pv != (g.get("pv") or []):
                     ch["pv"] = pv
                 if g.get("tracked"):
-                    su, lean, star = grade_game(g, sc["a"], sc["h"])
+                    su, lean, star = grade_game(gl, sc["a"], sc["h"])
                     new_gr = {"su": su, "lean": lean, "star": star, "props": pgr}
                     if gr != new_gr:
                         ch["gr"] = new_gr
                         if not g.get("gr"):
                             n_grade += 1
-                        cnt = {"W": 0, "L": 0, "P": 0}
+                        cnt = {"W": 0, "L": 0, "P": 0, "V": 0}
                         for r in pgr:
                             if r in cnt:
                                 cnt[r] += 1
-                        l = g.get("lean") or {}
+                        l = gl.get("lean") or {}
                         results[gid] = {"lg": g["lg"], "su": su, "lean": lean, "star": star,
-                                        "conf": l.get("conf"), "mk": l.get("mk"), "props": cnt}
+                                        "conf": l.get("conf"), "mk": l.get("mk"), "props": cnt, "locked": bool(lock)}
                         cv = ch.get("clv") or g.get("clv")
                         if cv:
                             results[gid]["clv"] = cv.get("pts")
@@ -396,6 +503,14 @@ def main():
         if results:
             results_by_slate.setdefault(slate, {}).update(results)
 
+    for slate, pg in pregame.items():
+        if not args.pregame or (not pg["games"] and not pg["snaps"]):
+            continue
+        exists = os.path.exists(os.path.join(args.docs, "pregame", f"{slate}.json"))
+        body = {"slate": slate, "updatedAt": now_iso, "feedCheckedAt": checked, "games": pg["games"], "snaps": pg["snaps"]}
+        f = _write(args.out, f"{slate}__pregame.json", body)
+        manifest.append({"op": "update" if exists else "set", "collection": "pregame", "doc_id": slate, "file_path": f})
+
     for slate, res in results_by_slate.items():
         rpath = os.path.join(args.docs, "results", f"{slate}.json")
         body = {"slate": slate, "updatedAt": now_iso, "games": res}
@@ -407,6 +522,12 @@ def main():
         bits.append(f"{len(unmatched)} not found in the feed")
     if prop_gaps:
         bits.append(f"{prop_gaps} prop{'s' if prop_gaps != 1 else ''} waiting on box scores")
+    if n_void:
+        bits.append(f"{n_void} prop{'s' if n_void != 1 else ''} voided (player not in the box score)")
+    if n_lock:
+        bits.append(f"{n_lock} pick{'s' if n_lock != 1 else ''} locked at kickoff")
+    if arch_n:
+        bits.append(f"{arch_n} older games read from the season archive")
     if feed_age is not None and feed_age > 45:
         bits.append(f"feed last changed {int(feed_age)} min ago")
     live = {"ranAt": now_iso, "updated": n_upd, "graded": n_grade, "note": ", ".join(bits) + "."}

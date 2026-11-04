@@ -11,7 +11,7 @@ on:
   # Also run right away when the robot's own code changes.
   push:
     branches: [main]
-    paths: ["fetch_scores.py", ".github/workflows/scores.yml"]
+    paths: ["fetch_scores.py", "odds_providers.py", ".github/workflows/scores.yml"]
 
 permissions:
   contents: write
@@ -30,11 +30,14 @@ jobs:
       - name: Fetch ESPN scores (every 5 minutes while games are on)
         env:
           FULL: ${{ github.event_name != 'schedule' || github.event.schedule == '7 12 * * *' }}
+          # Optional: more sportsbooks (DraftKings, FanDuel, BetMGM) from The Odds API. Leave the secret unset to use ESPN only.
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          ODDS_API_EVERY_MIN: "240"
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           save() {
-            git add -A scores box
+            git add -A scores box odds
             if git diff --cached --quiet; then return 0; fi
             git commit -q -m "Scores $(date -u +%Y-%m-%dT%H:%MZ)"
             git pull -q --rebase origin "${GITHUB_REF_NAME}" || true

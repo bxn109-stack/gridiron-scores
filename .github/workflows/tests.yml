@@ -1,0 +1,22 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+    paths: ["*.py", "tests/**", "web/**", ".github/workflows/tests.yml"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Python tests (robot, odds adapters, grader)
+        run: python3 -W error::ResourceWarning -m unittest discover -s tests -v
+      - name: JavaScript tests (betting math used by the page)
+        run: if [ -d web ]; then node --test web/; else echo "no web tests yet"; fi
