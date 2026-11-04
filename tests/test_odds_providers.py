@@ -49,6 +49,12 @@ class Parsers(unittest.TestCase):
         self.assertEqual(OP.num("PK"), 0.0)
         self.assertIsNone(OP.num("off"))
 
+    def test_book_names(self):
+        self.assertEqual(OP.canon("Draft Kings"), "DraftKings")
+        self.assertEqual(OP.canon("FanDuel"), "FanDuel")
+        self.assertEqual(OP.canon("Some Book"), "Some Book")
+        self.assertEqual(OP.espn_book({"provider": {"name": "Draft Kings"}, "spread": -3}, TS)["book"], "DraftKings")
+
     def test_implied(self):
         self.assertAlmostEqual(OP.implied(-110), 110 / 210)
         self.assertAlmostEqual(OP.implied(150), 0.4)

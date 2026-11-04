@@ -27,6 +27,17 @@ UTC = dt.timezone.utc
 
 
 # ---------- small parsers ----------
+BOOKS = {"draft kings": "DraftKings", "draftkings": "DraftKings", "fanduel": "FanDuel", "fan duel": "FanDuel", "betmgm": "BetMGM",
+         "bet mgm": "BetMGM", "espn bet": "ESPN BET", "caesars": "Caesars", "caesars sportsbook": "Caesars"}
+
+
+def canon(book):
+    """One spelling per sportsbook ("Draft Kings" and "DraftKings" are the same book)."""
+    if not book:
+        return book
+    return BOOKS.get(" ".join(str(book).lower().split()), str(book).strip())
+
+
 def am(x):
     """American price from a provider value: -110, '-110', '+130', 'EVEN'. None if absent or not a price."""
     if x is None:
@@ -114,7 +125,7 @@ def _espn_side(block, key, sub):
 def espn_book(o, retrieved, which="close"):
     """One ESPN odds object -> normalized quotes. which='close' is ESPN's current number, 'open' its opener.
     Handles both the newer moneyline/pointSpread/total blocks and the older homeTeamOdds/awayTeamOdds fields."""
-    q = {"book": (o.get("provider") or {}).get("name"), "src": "espn", "ts": retrieved, "pts": None}
+    q = {"book": canon((o.get("provider") or {}).get("name")), "src": "espn", "ts": retrieved, "pts": None}
     ml, sp, tot = {}, {}, {}
     for side, key in (("A", "away"), ("H", "home")):
         p = am(_espn_side(o.get("moneyline"), key, which).get("odds"))
@@ -194,7 +205,7 @@ def oddsapi_books(ev, retrieved):
     side_of = {home: "H", away: "A"}
     out = {}
     for bk in ev.get("bookmakers") or []:
-        q = {"book": bk.get("title"), "src": "oddsapi", "ts": retrieved, "pts": bk.get("last_update")}
+        q = {"book": canon(bk.get("title")), "src": "oddsapi", "ts": retrieved, "pts": bk.get("last_update")}
         for m in bk.get("markets") or []:
             k = m.get("key")
             for oc in m.get("outcomes") or []:

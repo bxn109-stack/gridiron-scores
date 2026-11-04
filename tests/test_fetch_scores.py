@@ -53,6 +53,12 @@ class MergeQuotes(unittest.TestCase):
         self.assertTrue(g["qclose"]["DraftKings"]["post_capture"])
         self.assertNotIn("quotes", g)
 
+    def test_old_book_spelling_merges(self):
+        old = {"quotes": {"Draft Kings": dict(DK1, book="Draft Kings")}, "qopen": {"Draft Kings": dict(DK1, book="Draft Kings")}}
+        g = FS.merge_quotes(game("pre", [DK2]), old)
+        self.assertEqual(set(g["qopen"]), {"DraftKings"})
+        self.assertEqual(g["quotes"]["DraftKings"]["ts"], DK1["ts"])
+
     def test_sync_open_close(self):
         g = FS.merge_quotes(game("pre", [DK1]), {})
         g["quotes"]["FanDuel"] = FD

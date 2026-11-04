@@ -142,6 +142,9 @@ def merge_quotes(g, old_g):
     first seen, so an unchanged price keeps its original time. qopen = first number per book (ESPN's opener when it
     gives one). qclose = the last pre-kickoff numbers. Quotes from other adapters (The Odds API) are kept between pulls."""
     cur, opn = g.pop("_q", ({}, {}))
+    for k in ("quotes", "qopen", "qclose"):       # older runs stored ESPN's "Draft Kings" spelling
+        if old_g.get(k):
+            old_g = dict(old_g, **{k: {OP.canon(b): dict(v, book=OP.canon(b)) for b, v in old_g[k].items()}})
     old_q = old_g.get("quotes") or {}
     if g["state"] == "pre":
         q = {b: v for b, v in old_q.items() if v.get("src") != "espn"}
