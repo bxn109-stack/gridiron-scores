@@ -87,7 +87,7 @@ class Run:
 
 
 class Grading(unittest.TestCase):
-    def test_old_game_graded_from_archive_with_push_lock_and_void(self):
+    def test_old_game_graded_from_archive_with_push_lock_and_unresolved(self):
         with tempfile.TemporaryDirectory() as t:
             R = Run(t)
             # 10 days old: outside the live feed, only in the season archive
@@ -106,15 +106,15 @@ class Grading(unittest.TestCase):
             self.assertEqual(ch["sc"], {"a": 21, "h": 24})
             self.assertEqual(ch["gr"]["lean"], "P")              # Chiefs -3 won by 3: push
             self.assertEqual(ch["gr"]["su"], "W")
-            self.assertEqual(ch["gr"]["props"], ["W", "V"])      # Mims not in the box score a week later: void
+            self.assertEqual(ch["gr"]["props"], ["W", "U"])      # Mims not in the box score a week later: unresolved
             self.assertIn("lock", ch)
             self.assertEqual(ch["lock"]["lean"]["ln"], 3)
             res = files[("results", "2026-10-24")]["games"]["NFL-broncos-chiefs"]
-            self.assertEqual(res["props"], {"W": 1, "L": 0, "P": 0, "V": 1})
+            self.assertEqual(res["props"], {"W": 1, "L": 0, "P": 0, "U": 1})
             self.assertTrue(res["locked"])
             self.assertIn("season archive", err)
 
-    def test_no_void_before_a_day(self):
+    def test_no_unresolved_before_a_day(self):
         with tempfile.TemporaryDirectory() as t:
             R = Run(t)
             e = espn("E5", "2026-11-04T13:00Z", ("Denver", "Broncos", "DEN"), ("Kansas City", "Chiefs", "KC"), sc=(10, 30),
@@ -162,9 +162,17 @@ class Grading(unittest.TestCase):
             self.assertEqual(ch["gr"]["props"], ["W", "X"])
             self.assertEqual(ch["lockdiff"], ["props"])
 
+    def test_new_stat_markets(self):
+        p = {"n": "QB", "passAtt": 31, "comp": 22, "kickPts": 0}
+        self.assertEqual(AS.stat_for("Pass attempts", p), 31)
+        self.assertEqual(AS.stat_for("Completions", p), 22)
+        self.assertIsNone(AS.stat_for("Pass attempts", {"n": "Old box", "passYds": 200}))
+        self.assertIsNone(AS.stat_for("Kicking points", {"n": "K"}))
+        self.assertEqual(AS.stat_for("Kicking points", {"n": "K", "kickPts": 9}), 9)
+
     def test_finished_counts_void_and_excluded(self):
         g = ledger_game("G", "", "", "", st="final", per={"a": [0] * 4, "h": [0] * 4}, props=[{}, {}], pv=[3, None],
-                        gr={"su": "W", "lean": "W", "star": None, "props": ["W", "V"]})
+                        gr={"su": "W", "lean": "W", "star": None, "props": ["W", "U"]})
         self.assertTrue(AS.finished(g))
         g["gr"]["props"] = ["W", None]
         self.assertFalse(AS.finished(g))

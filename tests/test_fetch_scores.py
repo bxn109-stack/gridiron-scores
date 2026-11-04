@@ -81,6 +81,38 @@ class Archive(unittest.TestCase):
                 got = json.load(fh)
             self.assertEqual(set(got["games"]), {"1", "2"})
 
+    def test_complete_flag(self):
+        import datetime as dt
+        with tempfile.TemporaryDirectory() as d:
+            day = dt.date(2026, 10, 30)
+            late = {"id": "9", "lg": "FBS", "completed": True}
+            FS.archive({day: [late]}, d)                        # only the edge of the live window: not complete
+            with open(os.path.join(d, "2026-10-30.json")) as fh:
+                self.assertFalse(json.load(fh)["complete"])
+            FS.archive({day: [late, {"id": "8", "lg": "FBS", "completed": True}]}, d, {day})
+            with open(os.path.join(d, "2026-10-30.json")) as fh:
+                got = json.load(fh)
+            self.assertTrue(got["complete"])
+            self.assertEqual(set(got["games"]), {"8", "9"})
+
+    def test_day_over(self):
+        import datetime as dt
+        day = dt.date(2026, 10, 30)
+        gs = [{"date": "2026-10-30T23:30Z", "completed": True}, {"date": "2026-10-31T02:30Z", "completed": False, "status": "STATUS_POSTPONED"}]
+        self.assertTrue(FS.day_over(gs, day))
+        gs.append({"date": "2026-10-30T20:00Z", "completed": False, "status": "STATUS_IN_PROGRESS"})
+        self.assertFalse(FS.day_over(gs, day))
+
+    def test_box_completions_and_kicking(self):
+        summ = {"boxscore": {"players": [{"team": {"abbreviation": "KC"}, "statistics": [
+            {"name": "passing", "keys": ["completions/passingAttempts", "passingYards", "passingTouchdowns", "interceptions"],
+             "athletes": [{"athlete": {"id": "1", "displayName": "Patrick Mahomes"}, "stats": ["22/31", "250", "2", "0"]}]},
+            {"name": "kicking", "keys": ["fieldGoalsMade/fieldGoalAttempts", "totalKickingPoints"],
+             "athletes": [{"athlete": {"id": "2", "displayName": "Harrison Butker"}, "stats": ["2/3", "9"]}]}]}]}}
+        ps = {p["n"]: p for p in FS.parse_box(summ)}
+        self.assertEqual((ps["Patrick Mahomes"]["comp"], ps["Patrick Mahomes"]["passAtt"], ps["Patrick Mahomes"]["passYds"]), (22, 31, 250))
+        self.assertEqual(ps["Harrison Butker"]["kickPts"], 9)
+
     def test_et_date(self):
         self.assertEqual(str(FS.et_date({"date": "2026-10-05T00:20Z"})), "2026-10-04")   # Sunday night game
         self.assertIsNone(FS.et_date({"date": None}))

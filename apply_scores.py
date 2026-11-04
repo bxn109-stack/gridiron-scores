@@ -12,7 +12,7 @@ and optionally DIR/results/<slate>.json. The script:
   - grades tracked games (su, lean, star, props) exactly as the runbook says, from a pick snapshot (`lock`) taken the
     first time the game is seen after kickoff, so later edits cannot change a graded pick,
   - reads the season archive (scores/final/<date>.json) for games older than the live feed's 4-day window,
-  - voids a prop when the player is missing from a final box score a day after the game (did not play),
+  - marks a prop unresolved (U) when the player or market is missing from the final box score a day after the game,
   - writes pregame/<slate>: sportsbook quotes (current, opening, closing) and an append-only history of the picks,
   - writes one update file per changed doc plus meta/live, and prints a JSON manifest:
       [{"op": "update"|"set", "collection": ..., "doc_id": ..., "file_path": ...}, ...]
@@ -34,7 +34,7 @@ RAW = "https://raw.githubusercontent.com/bxn109-stack/gridiron-scores/main"
 UTC = dt.timezone.utc
 ET = ZoneInfo("America/New_York")
 COLLEGE = {"FBS", "FCS"}
-VOID_AFTER = dt.timedelta(hours=30)   # a prop is voided only once the box score has had a day to settle
+VOID_AFTER = dt.timedelta(hours=30)   # a prop is marked unresolved only once the box score has had a day to settle
 
 
 # ---------- loading ----------
@@ -170,7 +170,13 @@ def stat_for(mk, p):
         return p.get("fp", 0)
     if m.startswith("rush rec yds") or m.startswith("rush and rec"):
         return g("rushYds") + g("recYds")
-    table = [("pass yds", "passYds"), ("passing yds", "passYds"), ("pass td", "passTD"), ("rush yds", "rushYds"),
+    if (m.startswith("pass att") or m.startswith("passing att") or m.startswith("completions")) and \
+            ("passAtt" not in p and "comp" not in p):
+        return None                          # older box files did not record these
+    if m.startswith("kicking") and "kickPts" not in p:
+        return None
+    table = [("pass att", "passAtt"), ("passing att", "passAtt"), ("completions", "comp"), ("kicking points", "kickPts"),
+             ("pass yds", "passYds"), ("passing yds", "passYds"), ("pass td", "passTD"), ("rush yds", "rushYds"),
              ("rushing yds", "rushYds"), ("rec yds", "recYds"), ("receiving yds", "recYds"), ("receptions", "rec"),
              ("longest rec", "longRec"), ("longest rush", "longRush"), ("rush att", "rushAtt"), ("carries", "rushAtt"),
              ("interceptions", "int"), ("int thrown", "int")]
@@ -263,7 +269,7 @@ def finished(g):
     pgr = (g.get("gr") or {}).get("props") or []
     if props:
         for i in range(len(props)):
-            done_res = i < len(pgr) and pgr[i] in ("V", "X")
+            done_res = i < len(pgr) and pgr[i] in ("V", "X", "U")
             if not done_res and (i >= len(pv) or pv[i] is None):
                 return False
     if g.get("tracked"):
@@ -468,8 +474,11 @@ def main():
                             pv[i] = v
                     if pgr[i] is None:
                         pgr[i] = grade_ou(pv[i], lp.get("ln"), lp.get("side"))
-                    if pgr[i] is None and players and not pl and now - ko > VOID_AFTER:
-                        pgr[i] = "V"              # not in the final box score a day later: did not play (books void these)
+                    if pgr[i] is None and players and now - ko > VOID_AFTER:
+                        # a day after the game the box score is settled. Not in it: inactive (books void) or played
+                        # without a stat (a loss for Overs), which the box score cannot tell apart; a market the box
+                        # score does not carry (D/ST, kicking, etc.) cannot be graded either. Marked unresolved.
+                        pgr[i] = "U"
                         n_void += 1
                     if pgr[i] is None:
                         prop_gaps += 1
@@ -482,7 +491,7 @@ def main():
                         ch["gr"] = new_gr
                         if not g.get("gr"):
                             n_grade += 1
-                        cnt = {"W": 0, "L": 0, "P": 0, "V": 0}
+                        cnt = {"W": 0, "L": 0, "P": 0, "U": 0}
                         for r in pgr:
                             if r in cnt:
                                 cnt[r] += 1
@@ -523,7 +532,7 @@ def main():
     if prop_gaps:
         bits.append(f"{prop_gaps} prop{'s' if prop_gaps != 1 else ''} waiting on box scores")
     if n_void:
-        bits.append(f"{n_void} prop{'s' if n_void != 1 else ''} voided (player not in the box score)")
+        bits.append(f"{n_void} prop{'s' if n_void != 1 else ''} unresolved (player or market not in the box score)")
     if n_lock:
         bits.append(f"{n_lock} pick{'s' if n_lock != 1 else ''} locked at kickoff")
     if arch_n:

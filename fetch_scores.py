@@ -192,6 +192,7 @@ CATS = {
                 {"CAR": "rushAtt", "YDS": "rushYds", "TD": "rushTD", "LONG": "longRush"}),
     "receiving": ({"receptions": "rec", "receivingYards": "recYds", "receivingTouchdowns": "recTD", "longReception": "longRec", "receivingTargets": "tgt"},
                   {"REC": "rec", "YDS": "recYds", "TD": "recTD", "LONG": "longRec", "TGTS": "tgt"}),
+    "kicking": ({"totalKickingPoints": "kickPts"}, {"PTS": "kickPts"}),
     "fumbles": ({"fumblesLost": "fumLost"}, {"LOST": "fumLost"}),
     "kickReturns": ({"kickReturnTouchdowns": "retTD"}, {"TD": "retTD"}),
     "puntReturns": ({"puntReturnTouchdowns": "retTD"}, {"TD": "retTD"}),
@@ -220,6 +221,12 @@ def parse_box(summary):
                 pid = str(ath.get("id") or ath.get("displayName"))
                 p = players.setdefault(pid, {"n": ath.get("displayName"), "tm": abbr})
                 for i, v in enumerate(a.get("stats") or []):
+                    k = keys[i] if i < len(keys) else (labels[i] if i < len(labels) else None)
+                    if k in ("completions/passingAttempts", "C/ATT") and "/" in str(v):
+                        c, at = (to_int(x) for x in str(v).split("/", 1))
+                        if c is not None and at is not None:
+                            p["comp"], p["passAtt"] = c, at
+                        continue
                     f = by_key.get(keys[i]) if i < len(keys) else None
                     if f is None and i < len(labels):
                         f = by_label.get(labels[i])
@@ -294,19 +301,27 @@ def fetch_dates(dates, retrieved, sample):
     return out, fetched
 
 
-def archive(games_by_date, final_dir):
-    """Merge finished games into scores/final/<date>.json. Returns the number of files written."""
+def archive(games_by_date, final_dir, complete=()):
+    """Merge finished games into scores/final/<date>.json. Dates in `complete` had their whole scoreboard fetched with
+    every game over, so the file is marked complete and never re-fetched. Returns the number of files written."""
     written = 0
-    for d, gs in games_by_date.items():
+    for d in set(games_by_date) | set(complete):
         path = os.path.join(final_dir, f"{d.isoformat()}.json")
         cur = read_json(path, {"date": d.isoformat(), "games": {}})
         new = dict(cur.get("games") or {})
-        for g in gs:
+        for g in games_by_date.get(d, []):
             new[g["id"]] = g
-        if new != cur.get("games") or not os.path.exists(path):
-            write_json(path, {"date": d.isoformat(), "games": new})
+        done = bool(cur.get("complete")) or d in complete
+        if new != cur.get("games") or done != bool(cur.get("complete")) or not os.path.exists(path):
+            write_json(path, {"date": d.isoformat(), "complete": done, "games": new})
             written += 1
     return written
+
+
+def day_over(games, d):
+    """True when every game on US Eastern date d is final, postponed or cancelled (nothing more will change)."""
+    on = [g for g in games if et_date(g) == d]
+    return all(g.get("completed") or g.get("status") in ("STATUS_POSTPONED", "STATUS_CANCELED") for g in on)
 
 
 def main():
@@ -372,24 +387,26 @@ def main():
         if g.get("completed"):
             by_date.setdefault(et_date(g), []).append(g)
     by_date.pop(None, None)
-    n_arch = archive(by_date, final_dir)
-    # catch up any missing archive dates (first run after this change back-fills the season)
+    fetched_days = {dt.datetime.strptime(x, "%Y%m%d").date() for x in dates}
+    whole = {d for d in fetched_days if d < today and day_over(fresh.values(), d)}
+    n_arch = archive(by_date, final_dir, whole)
+    # catch up dates that were never fetched in full (first run after this change back-fills the season; a file
+    # written only from the edge of the live window is not complete, so its date is fetched again)
     missing = []
     d = ARCHIVE_START
-    while d < today - dt.timedelta(days=KEEP_DAYS_BACK):
-        if not os.path.exists(os.path.join(final_dir, f"{d.isoformat()}.json")):
+    while d < today - dt.timedelta(days=1):
+        if not read_json(os.path.join(final_dir, f"{d.isoformat()}.json"), {}).get("complete"):
             missing.append(d)
         d += dt.timedelta(days=1)
     for d in missing[:BACKFILL_MAX_DATES]:
         got, ok = fetch_dates([d.strftime("%Y%m%d")], retrieved, None)
-        if ok == 0:
+        if ok < len(FEEDS):
             continue
-        done = [merge_quotes(g, {}) for g in got.values() if g.get("completed") and et_date(g) == d]
-        if not archive({d: done}, final_dir) and not os.path.exists(os.path.join(final_dir, f"{d.isoformat()}.json")):
-            write_json(os.path.join(final_dir, f"{d.isoformat()}.json"), {"date": d.isoformat(), "games": {}})
-        n_arch += 1
+        done = [merge_quotes(g, games.get(g["id"]) or {}) for g in got.values() if g.get("completed") and et_date(g) == d]
+        over = day_over(got.values(), d) or d < today - dt.timedelta(days=14)
+        n_arch += archive({d: done}, final_dir, {d} if over else ())
     if n_arch:
-        print(f"Archive: {n_arch} date file(s) written" + (f", {len(missing)} missing before this run" if missing else ""))
+        print(f"Archive: {n_arch} date file(s) written" + (f", {len(missing)} incomplete before this run" if missing else ""))
 
     # box scores for finished NFL and FBS games we have not saved yet (window first, then the archive)
     box_dir = os.path.join(ROOT, "box")
