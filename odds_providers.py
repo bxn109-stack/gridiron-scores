@@ -255,27 +255,65 @@ def swap_sides(q):
     return out
 
 
-def due(state_path, every_min, now):
+def _state(state_path):
     try:
         with open(state_path) as f:
-            last = json.load(f).get("last_pull")
-        return not last or (now - dt.datetime.fromisoformat(last)).total_seconds() >= every_min * 60
+            return json.load(f) or {}
     except (OSError, ValueError):
+        return {}
+
+
+def due(state_path, every_min, now):
+    last = _state(state_path).get("last_pull")
+    try:
+        return not last or (now - dt.datetime.fromisoformat(last)).total_seconds() >= every_min * 60
+    except ValueError:
         return True
 
 
+def pace(state, now, cost, floor_min=240, soon=True):
+    """Minutes between pulls so the requests left last until the 1st of next month. The free tier has 500 a month
+    and each pull costs 3 per sport (moneyline, spread and total), so pulling every 4 hours would run out mid-month.
+    Twice as long when no game starts within a day; a new month starts fresh."""
+    try:
+        rem = int(state.get("remaining"))
+    except (TypeError, ValueError):
+        return floor_min
+    last = state.get("last_pull")
+    try:
+        if last and dt.datetime.fromisoformat(last).strftime("%Y-%m") != now.strftime("%Y-%m"):
+            return floor_min
+    except ValueError:
+        pass
+    nxt = (now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) + dt.timedelta(days=32)).replace(day=1)
+    every = max(floor_min, (nxt - now).total_seconds() / 60 / max(1, rem // max(1, cost)))
+    return every if soon else every * 2
+
+
 def oddsapi_merge(games, key, state_path, every_min=240, now=None, fetch=oddsapi_fetch):
-    """Pull The Odds API at most every `every_min` minutes and attach quotes to matching games (in place).
-    Returns a short status string for the log."""
+    """Pull The Odds API at most every `every_min` minutes, paced so the monthly quota lasts (see pace), and attach
+    quotes to matching games (in place). Returns a short status string for the log."""
     now = now or dt.datetime.now(UTC)
     if not key:
         return "The Odds API: no key set (add the ODDS_API_KEY secret to enable DraftKings/FanDuel/BetMGM prices)"
-    if not due(state_path, every_min, now):
-        return "The Odds API: not due yet"
+    pools = {lg_key: [g for g in games if (g["lg"] == "NFL") == (lg_key == "NFL") and g.get("state") == "pre"] for lg_key in ODDS_SPORTS}
+    cost = 3 * sum(1 for p in pools.values() if p)
+    if not cost:
+        return "The Odds API: no upcoming games"
+
+    def starts_soon(g):
+        try:
+            return 0 <= (dt.datetime.fromisoformat(g["date"].replace("Z", "+00:00")) - now).total_seconds() <= 86400
+        except (KeyError, ValueError):
+            return False
+    st = _state(state_path)
+    every = pace(st, now, cost, every_min, soon=any(starts_soon(g) for p in pools.values() for g in p))
+    if not due(state_path, every, now):
+        return f"The Odds API: not due yet (one pull every {every / 60:.1f} h so the {st.get('remaining')} requests left last the month)"
     retrieved = now.isoformat(timespec="seconds")
     matched, remaining, errors = 0, None, []
     for lg_key, sport in ODDS_SPORTS.items():
-        pool = [g for g in games if (g["lg"] == "NFL") == (lg_key == "NFL") and g.get("state") == "pre"]
+        pool = pools[lg_key]
         if not pool:
             continue
         try:

@@ -165,6 +165,28 @@ class OddsApi(unittest.TestCase):
             with open(st) as fh:
                 self.assertEqual(json.load(fh)["remaining"], "487")
 
+    def test_pulls_are_paced_to_the_monthly_quota(self):
+        now = dt.datetime(2026, 11, 4, 17, tzinfo=dt.timezone.utc)
+        st = {"remaining": "494", "last_pull": "2026-11-04T16:00:00+00:00"}
+        every = OP.pace(st, now, 6)
+        self.assertAlmostEqual(every, (dt.datetime(2026, 12, 1, tzinfo=dt.timezone.utc) - now).total_seconds() / 60 / 82, places=6)
+        left = (dt.datetime(2026, 12, 1, tzinfo=dt.timezone.utc) - now).total_seconds() / 60
+        self.assertLessEqual(6 * left / every, 494)                        # the requests left last to the 1st
+        self.assertEqual(OP.pace(st, now, 6, soon=False), 2 * every)       # no game within a day: half as often
+        self.assertEqual(OP.pace({"remaining": "480"}, now.replace(day=30), 6), 240)   # near the reset: the floor
+        self.assertEqual(OP.pace({"remaining": "0", "last_pull": "2026-10-31T20:00:00+00:00"}, now, 6), 240)  # new month
+        self.assertEqual(OP.pace({}, now, 6), 240)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "s.json")
+            with open(path, "w") as fh:
+                json.dump(st, fh)
+            soon = dict(ESPN_GAME, date="2026-11-05T01:15Z", state="pre")
+            college = dict(soon, id="402", lg="FBS")
+            msg = OP.oddsapi_merge([soon, college], "k", path, now=now + dt.timedelta(hours=3), fetch=lambda s, k: ([], "490"))
+            self.assertIn("not due", msg)                                    # 4 hours since the last pull; two sports cost 6
+            msg = OP.oddsapi_merge([soon], "k", path, now=now + dt.timedelta(hours=3), fetch=lambda s, k: ([], "490"))
+            self.assertIn("requests left", msg)                              # NFL alone costs 3, so every 4 hours fits
+
     def test_merge_survives_errors(self):
         def boom(sport, key):
             raise RuntimeError("HTTP 401")
