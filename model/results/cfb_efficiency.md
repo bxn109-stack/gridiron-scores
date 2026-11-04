@@ -1,6 +1,6 @@
 # College football efficiency model backtest
 
-Updated 2026-09-27 13:16 UTC. Walk-forward ratings from garbage-time-free advanced stats (points added per play, success rate, pace), plus recruiting talent and returning production early in the season. Blend weights fitted on 2014–2019 only; scored on 2021–2025.
+Updated 2026-11-04 18:06 UTC. Walk-forward ratings from garbage-time-free advanced stats (points added per play, success rate, pace), plus recruiting talent and returning production early in the season. Blend weights fitted on 2014–2019 only; scored on 2021–2025.
 
 ## Data check
 
@@ -8,45 +8,45 @@ Updated 2026-09-27 13:16 UTC. Walk-forward ratings from garbage-time-free advanc
 - Talent ratings: 2275 team-seasons; returning production: 1555 team-seasons
 - Games with an opening line: tuning seasons 0, test seasons 4405
 - Advanced-stat fields seen: `defense, gameId, offense, opponent, season, seasonType, team, week`; offense fields: `drives, explosiveness, lineYards, lineYardsTotal, openFieldYards, openFieldYardsTotal, passingDowns, passingPlays, plays, powerSuccess, ppa, rushingPlays, secondLevelYards, secondLevelYardsTotal, standardDowns, stuffRate, successRate, totalPPA`
-- talent 2014: cached, 0 rows; returning production 2014: cached, 125 rows
-- talent 2015: cached, 232 rows; returning production 2015: cached, 128 rows
-- talent 2016: cached, 237 rows; returning production 2016: cached, 128 rows
-- talent 2017: cached, 157 rows; returning production 2017: cached, 128 rows
-- talent 2018: cached, 236 rows; returning production 2018: cached, 130 rows
-- talent 2019: cached, 231 rows; returning production 2019: cached, 130 rows
-- talent 2020: cached, 219 rows; returning production 2020: cached, 130 rows
-- talent 2021: cached, 224 rows; returning production 2021: cached, 128 rows
-- talent 2022: cached, 233 rows; returning production 2022: cached, 130 rows
-- talent 2023: cached, 238 rows; returning production 2023: cached, 131 rows
-- talent 2024: cached, 134 rows; returning production 2024: cached, 133 rows
-- talent 2025: cached, 134 rows; returning production 2025: cached, 134 rows
-- advanced stats 2014 regular: cached, 1618 rows
-- advanced stats 2014 postseason: cached, 78 rows
-- advanced stats 2015 regular: cached, 1644 rows
-- advanced stats 2015 postseason: cached, 82 rows
-- advanced stats 2016 regular: cached, 1632 rows
-- advanced stats 2016 postseason: cached, 82 rows
-- advanced stats 2017 regular: cached, 1658 rows
-- advanced stats 2017 postseason: cached, 80 rows
-- advanced stats 2018 regular: cached, 1684 rows
-- advanced stats 2018 postseason: cached, 78 rows
-- advanced stats 2019 regular: cached, 1694 rows
-- advanced stats 2019 postseason: cached, 80 rows
-- advanced stats 2020 regular: cached, 1084 rows
-- advanced stats 2020 postseason: cached, 52 rows
-- advanced stats 2021 regular: cached, 1698 rows
-- advanced stats 2021 postseason: cached, 76 rows
-- advanced stats 2022 regular: cached, 2822 rows
-- advanced stats 2022 postseason: cached, 96 rows
-- advanced stats 2023 regular: cached, 2850 rows
-- advanced stats 2023 postseason: cached, 134 rows
-- advanced stats 2024 regular: cached, 3112 rows
-- advanced stats 2024 postseason: cached, 100 rows
-- advanced stats 2025 regular: cached, 3216 rows
-- advanced stats 2025 postseason: cached, 100 rows
+- talent 2014: downloaded in 0 s, 0 rows; returning production 2014: downloaded in 0 s, 125 rows
+- talent 2015: downloaded in 0 s, 232 rows; returning production 2015: downloaded in 0 s, 128 rows
+- talent 2016: downloaded in 0 s, 237 rows; returning production 2016: downloaded in 0 s, 128 rows
+- talent 2017: downloaded in 0 s, 157 rows; returning production 2017: downloaded in 0 s, 128 rows
+- talent 2018: downloaded in 0 s, 236 rows; returning production 2018: downloaded in 0 s, 130 rows
+- talent 2019: downloaded in 0 s, 231 rows; returning production 2019: downloaded in 0 s, 130 rows
+- talent 2020: downloaded in 0 s, 219 rows; returning production 2020: downloaded in 0 s, 130 rows
+- talent 2021: downloaded in 0 s, 224 rows; returning production 2021: downloaded in 0 s, 128 rows
+- talent 2022: downloaded in 0 s, 233 rows; returning production 2022: downloaded in 0 s, 130 rows
+- talent 2023: downloaded in 0 s, 238 rows; returning production 2023: downloaded in 0 s, 131 rows
+- talent 2024: downloaded in 1 s, 134 rows; returning production 2024: downloaded in 0 s, 133 rows
+- talent 2025: downloaded in 0 s, 134 rows; returning production 2025: downloaded in 1 s, 134 rows
+- advanced stats 2014 regular: downloaded in 13 s, 1618 rows
+- advanced stats 2014 postseason: downloaded in 4 s, 78 rows
+- advanced stats 2015 regular: downloaded in 10 s, 1644 rows
+- advanced stats 2015 postseason: downloaded in 1 s, 82 rows
+- advanced stats 2016 regular: downloaded in 11 s, 1632 rows
+- advanced stats 2016 postseason: downloaded in 1 s, 82 rows
+- advanced stats 2017 regular: downloaded in 9 s, 1658 rows
+- advanced stats 2017 postseason: downloaded in 2 s, 80 rows
+- advanced stats 2018 regular: downloaded in 9 s, 1684 rows
+- advanced stats 2018 postseason: downloaded in 2 s, 78 rows
+- advanced stats 2019 regular: downloaded in 7 s, 1694 rows
+- advanced stats 2019 postseason: downloaded in 1 s, 80 rows
+- advanced stats 2020 regular: downloaded in 4 s, 1084 rows
+- advanced stats 2020 postseason: downloaded in 0 s, 52 rows
+- advanced stats 2021 regular: downloaded in 8 s, 1698 rows
+- advanced stats 2021 postseason: downloaded in 1 s, 76 rows
+- advanced stats 2022 regular: downloaded in 18 s, 2822 rows
+- advanced stats 2022 postseason: downloaded in 1 s, 96 rows
+- advanced stats 2023 regular: downloaded in 21 s, 2850 rows
+- advanced stats 2023 postseason: downloaded in 1 s, 134 rows
+- advanced stats 2024 regular: downloaded in 23 s, 3112 rows
+- advanced stats 2024 postseason: downloaded in 0 s, 100 rows
+- advanced stats 2025 regular: downloaded in 12 s, 3216 rows
+- advanced stats 2025 postseason: downloaded in 0 s, 100 rows
 - Efficiency settings: `{"k": 0.1, "re": 0.5, "kp": 0.05, "fcs_e": 0.3}`; points-rating settings: `{"k": 0.12, "regress": 0.8, "hfa": 3.0, "cap": 28, "fcs_start": -20.0}`
-- Spread blend weights (fitted on 5186 tuning games): home field +2.795, points rating +0.726, PPA/play edge -1.275, success-rate edge +64.180, talent (per 100) +1.167, talent, early weeks +1.776, returning production, early weeks +10.705
-- Total blend weights (4801 games): constant +17.094, points-based total +0.703, PPA sum +23.991, success-rate sum +4.442, pace +0.155
+- Spread blend weights (fitted on 5186 tuning games): home field +2.795, points rating +0.725, PPA/play edge -1.171, success-rate edge +64.030, talent (per 100) +1.166, talent, early weeks +1.777, returning production, early weeks +10.704
+- Total blend weights (4801 games): constant +17.084, points-based total +0.703, PPA sum +23.898, success-rate sum +4.596, pace +0.155
 
 ## Average miss on the final margin (lower is better)
 
@@ -54,7 +54,7 @@ Updated 2026-09-27 13:16 UTC. Walk-forward ratings from garbage-time-free advanc
 |---|---|---|
 | Closing line (the market) | 12.48 (5186 games) | 12.07 (6913 games) |
 | Points rating only (old model) | 14.29 | 13.80 |
-| Efficiency only | 13.46 | 13.27 |
+| Efficiency only | 13.46 | 13.26 |
 | Efficiency + points (new model) | 13.21 | 12.90 |
 
 ## Does the model add anything the line doesn't already know?
@@ -70,13 +70,13 @@ Fits final margin = a × line + b × model on earlier seasons, then checks the a
 
 | Model disagrees by | vs closing line | vs opening line |
 |---|---|---|
-| 1+ pts | 2786–2810 (49.8%, ROI -5.0%) | 1743–1722 (50.3%, ROI -4.0%) |
-| 2+ pts | 2208–2258 (49.4%, ROI -5.6%) | 1349–1350 (50.0%, ROI -4.6%) |
-| 3+ pts | 1699–1756 (49.2%, ROI -6.1%) | 1030–1014 (50.4%, ROI -3.8%) |
-| 4+ pts | 1309–1348 (49.3%, ROI -5.9%) | 787–753 (51.1%, ROI -2.4%) |
-| 5+ pts | 1001–1019 (49.6%, ROI -5.4%) | 573–540 (51.5%, ROI -1.7%) |
-| 7+ pts | 559–572 (49.4%, ROI -5.6%) | 299–295 (50.3%, ROI -3.9%) |
-| 10+ pts | 241–276 (46.6%, ROI -11.0%) | 109–127 (46.2%, ROI -11.8%) |
+| 1+ pts | 2781–2805 (49.8%, ROI -5.0%) | 1746–1723 (50.3%, ROI -3.9%) |
+| 2+ pts | 2201–2260 (49.3%, ROI -5.8%) | 1347–1355 (49.9%, ROI -4.8%) |
+| 3+ pts | 1700–1750 (49.3%, ROI -5.9%) | 1023–1005 (50.4%, ROI -3.7%) |
+| 4+ pts | 1312–1346 (49.4%, ROI -5.8%) | 785–754 (51.0%, ROI -2.6%) |
+| 5+ pts | 996–1015 (49.5%, ROI -5.4%) | 571–535 (51.6%, ROI -1.4%) |
+| 7+ pts | 560–571 (49.5%, ROI -5.5%) | 296–291 (50.4%, ROI -3.7%) |
+| 10+ pts | 242–275 (46.8%, ROI -10.6%) | 108–128 (45.8%, ROI -12.6%) |
 
 ## Same, old points-only model, for comparison
 
@@ -92,27 +92,27 @@ Betting the opening number and watching it close in your direction (beating the 
 
 | Model disagrees with opener by | Games | Closed toward model | Closed away | Average move toward model |
 |---|---|---|---|---|
-| 2+ pts | 2740 | 1345 (49%) | 1008 (37%) | +0.39 pts |
-| 3+ pts | 2074 | 1007 (49%) | 765 (37%) | +0.40 pts |
-| 5+ pts | 1134 | 552 (49%) | 411 (36%) | +0.50 pts |
-| 7+ pts | 603 | 286 (47%) | 229 (38%) | +0.55 pts |
+| 2+ pts | 2743 | 1347 (49%) | 1009 (37%) | +0.38 pts |
+| 3+ pts | 2058 | 1000 (49%) | 756 (37%) | +0.39 pts |
+| 5+ pts | 1127 | 554 (49%) | 404 (36%) | +0.52 pts |
+| 7+ pts | 595 | 279 (47%) | 228 (38%) | +0.55 pts |
 
 ## By matchup type (test seasons, new model disagrees by 3+ pts)
 
 | Matchup | vs closing | vs opening |
 |---|---|---|
-| Power vs Power | 350–387 (47.5%) | 378–347 (52.1%) |
-| Power vs Group of 5 | 185–177 (51.1%) | 187–167 (52.8%) |
-| Group of 5 vs Group of 5 | 301–340 (47.0%) | 301–325 (48.1%) |
-| FCS involved | 863–852 (50.3%) | 164–175 (48.4%) |
+| Power vs Power | 349–386 (47.5%) | 374–344 (52.1%) |
+| Power vs Group of 5 | 186–174 (51.7%) | 186–165 (53.0%) |
+| Group of 5 vs Group of 5 | 301–341 (46.9%) | 298–323 (48.0%) |
+| FCS involved | 864–849 (50.4%) | 165–173 (48.8%) |
 
 ## Total bets on test seasons, new model
 
 | Model total differs by | vs closing total | vs opening total |
 |---|---|---|
-| 2+ pts | 2266–2135 (51.5%, ROI -1.7%) | 1407–1323 (51.5%, ROI -1.6%) |
-| 4+ pts | 1246–1177 (51.4%, ROI -1.8%) | 739–711 (51.0%, ROI -2.7%) |
-| 6+ pts | 627–564 (52.6%, ROI +0.5%) | 331–319 (50.9%, ROI -2.8%) |
-| 8+ pts | 236–242 (49.4%, ROI -5.7%) | 115–117 (49.6%, ROI -5.4%) |
+| 2+ pts | 2259–2133 (51.4%, ROI -1.8%) | 1404–1321 (51.5%, ROI -1.6%) |
+| 4+ pts | 1241–1169 (51.5%, ROI -1.7%) | 740–714 (50.9%, ROI -2.8%) |
+| 6+ pts | 628–561 (52.8%, ROI +0.8%) | 327–315 (50.9%, ROI -2.8%) |
+| 8+ pts | 234–245 (48.9%, ROI -6.7%) | 113–121 (48.3%, ROI -7.8%) |
 
-Break-even at −110 is 52.4%. Small groups (under ~200 bets) swing a lot by chance. Run time 15 s.
+Break-even at −110 is 52.4%. Small groups (under ~200 bets) swing a lot by chance. Run time 175 s.
