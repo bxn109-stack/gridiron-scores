@@ -100,7 +100,7 @@
               'none'       no edge: expected value is the book's margin or worse
               'unavailable' no actual quote, stale quote, or no probability to judge it with
      The labels for chance, value, evidence and long shots are kept separate on purpose. */
-  const RULES = { minProb: 0.80, minN: 50, maxQuoteAgeMin: 360, k: 100, highChance: 0.70, longShotAm: 300 };
+  const RULES = { minProb: 0.80, minN: 50, maxQuoteAgeMin: 360, k: 100, highChance: 0.70, longShotAm: 300, minModelEv: 0.01 };
   function evaluate(x, rules = RULES){
     const out = { verdict: 'unavailable', ev: null, p: null, be: null, pBeat: null, n: 0, reasons: [], labels: [] };
     const dec = x.dec, be = breakEven(dec);
@@ -121,8 +121,9 @@
     out.pPush = pPush;
     out.ev = ev(p*(1 - pPush), dec, pPush);   // p is the chance among bets that do not push; a push returns the stake
     if (x.needsNews) out.reasons.push('Depends on unconfirmed player news.');
-    if (out.ev > 0 && out.pBeat != null && out.pBeat >= rules.minProb && out.n >= rules.minN && !x.needsNews){ out.verdict = 'value'; out.labels.push('value'); }
-    else if (out.ev > 0){ out.verdict = 'possible'; out.reasons.push(out.n ? `Only ${out.n} graded picks behind this kind of bet (${Math.round((out.pBeat||0)*100)}% chance it beats break-even).` : 'No measured record behind it.'); }
+    if (x.validated && out.ev > rules.minModelEv && !x.needsNews){ out.verdict = 'value'; out.labels.push('value'); out.reasons.push('Priced by a model that passed its out-of-sample test.'); }
+    else if (out.ev > 0 && out.pBeat != null && out.pBeat >= rules.minProb && out.n >= rules.minN && !x.needsNews){ out.verdict = 'value'; out.labels.push('value'); }
+    else if (out.ev > 0){ out.verdict = 'possible'; out.reasons.push(out.n ? `Only ${out.n} graded picks behind this kind of bet (${Math.round((out.pBeat||0)*100)}% chance it beats break-even).` : 'No validated model behind it: the price is only better than the market average.'); }
     else { out.verdict = 'none'; out.reasons.push('No measured edge: the expected value is the book’s margin.'); }
     return out;
   }

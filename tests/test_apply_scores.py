@@ -69,6 +69,9 @@ class Run:
     def players(self, obj):
         dump(obj, os.path.join(self.tmp, "players.json"))
 
+    def shadow(self, obj):
+        dump(obj, os.path.join(self.tmp, "shadow.json"))
+
     def pregame(self, slate, body):
         dump(body, os.path.join(self.tmp, "docs", "pregame", f"{slate}.json"))
 
@@ -86,7 +89,8 @@ class Run:
         r = subprocess.run([sys.executable, os.path.join(ROOT, "apply_scores.py"), "--docs", os.path.join(self.tmp, "docs"), "--out", out,
                             "--scores", os.path.join(self.tmp, "latest.json"), "--box", os.path.join(self.tmp, "box"),
                             "--final", os.path.join(self.tmp, "final"), "--now", now,
-                            "--model", os.path.join(self.tmp, "model.json"), "--players", os.path.join(self.tmp, "players.json")] + self.extra,
+                            "--model", os.path.join(self.tmp, "model.json"), "--players", os.path.join(self.tmp, "players.json"),
+                            "--shadow", os.path.join(self.tmp, "shadow.json")] + self.extra,
                            capture_output=True, text=True)
         if r.returncode:
             raise AssertionError(r.stderr)
@@ -353,6 +357,160 @@ class ModelLayer(unittest.TestCase):
     def test_model_result_against_the_close(self):
         self.assertEqual(AS.model_result({"m": 5.0, "t": 40.0}, 3.5, 44.5, {"a": 20, "h": 23}), [1.5, "L", -4.5, "W"])
         self.assertEqual(AS.model_result({"m": 3.5}, 3.5, None, {"a": 0, "h": 7})[:2], [0.0, None])
+
+
+
+class VerifiedLocks(unittest.TestCase):
+    """Assignment 4: a pick gets pregame credit only from a copy saved before kickoff; model predictions likewise."""
+
+    def snap(self, g, at, prev=None):
+        body = {k: AS.pick_snapshot(g)[k] for k in AS.SNAP_KEYS}
+        return dict(body, at=at, h=AS.chain(prev, body, at))
+
+    def started(self, R):
+        e = espn("E7", "2026-11-08T18:00Z", ("Denver", "Broncos", "DEN"), ("Kansas City", "Chiefs", "KC"), state="in",
+                 status="STATUS_IN_PROGRESS")
+        e["away"]["score"], e["home"]["score"] = 0, 7
+        R.feed([e])
+
+    def test_lock_is_the_last_pregame_copy(self):
+        with tempfile.TemporaryDirectory() as t:
+            R = Run(t)
+            g = ledger_game("G7", "2026-11-08T13:00:00-05:00", "Broncos", "Chiefs", eid="E7")
+            s1 = self.snap(g, "2026-11-08T14:00:00+00:00")
+            R.pregame("2026-11-07", {"slate": "2026-11-07", "games": {}, "snaps": {"G7": [s1]}})
+            g["lean"] = {"mk": "spread", "side": "A", "ln": 3, "conf": 1}           # changed later, never saved before kickoff
+            R.doc("2026-11-07", "NFL", [g]); self.started(R)
+            _, files, err = R.go("2026-11-08T18:20:00+00:00")
+            lock = files[("slates/2026-11-07/leagues", "NFL")]["games"]["G7"]["lock"]
+            self.assertTrue(lock["v"]); self.assertTrue(lock["chain_ok"])
+            self.assertEqual(lock["lean"]["side"], "H")                             # the pregame copy, not the later edit
+            self.assertEqual(lock["pre"], "2026-11-08T14:00:00+00:00")
+            self.assertIn("lean", files[("slates/2026-11-07/leagues", "NFL")]["games"]["G7"]["lockdiff"])
+
+    def test_no_pregame_copy_means_unverified(self):
+        with tempfile.TemporaryDirectory() as t:
+            R = Run(t)
+            g = ledger_game("G7", "2026-11-08T13:00:00-05:00", "Broncos", "Chiefs", eid="E7")
+            R.doc("2026-11-07", "NFL", [g]); self.started(R)
+            _, files, _ = R.go("2026-11-08T18:20:00+00:00")
+            lock = files[("slates/2026-11-07/leagues", "NFL")]["games"]["G7"]["lock"]
+            self.assertFalse(lock["v"])
+            self.assertIn("no copy saved before kickoff", lock["src"])
+
+    def test_predictions_after_kickoff_get_no_credit(self):
+        with tempfile.TemporaryDirectory() as t:
+            R = Run(t)
+            g = ledger_game("G7", "2026-11-08T13:00:00-05:00", "Broncos", "Chiefs", eid="E7")
+            late = {"model": "ledger-v1", "version": "v", "asof": "2026-11-02T20:15", "m": 4.0, "t": 44.0, "pp": None, "at": "2026-11-08T18:05:00+00:00"}
+            leaky = dict(late, at="2026-11-08T12:00:00+00:00", asof="2026-11-08T19:00:00Z")   # made before kickoff from later data
+            R.pregame("2026-11-07", {"slate": "2026-11-07", "games": {}, "snaps": {}, "preds": {"G7": [leaky, late]}})
+            R.doc("2026-11-07", "NFL", [g]); self.started(R)
+            _, files, _ = R.go("2026-11-08T18:20:00+00:00")
+            self.assertNotIn("lm", files[("slates/2026-11-07/leagues", "NFL")]["games"]["G7"]["lock"])
+
+    def test_hash_chain_detects_edits(self):
+        g = ledger_game("G7", "", "Broncos", "Chiefs")
+        a = self.snap(g, "2026-11-06T11:00:00+00:00")
+        g["lean"] = {"mk": "spread", "side": "A", "ln": 3, "conf": 1}
+        b = self.snap(g, "2026-11-07T15:00:00+00:00", a["h"])
+        self.assertTrue(AS.verify_chain([a, b], AS.SNAP_KEYS))
+        tampered = dict(a, lean={"mk": "spread", "side": "A", "ln": 3, "conf": 3})
+        self.assertFalse(AS.verify_chain([tampered, b], AS.SNAP_KEYS))
+        self.assertFalse(AS.verify_chain([b], AS.SNAP_KEYS))                       # a removed record breaks the chain
+
+    def test_prediction_records_are_appended_not_replaced(self):
+        with tempfile.TemporaryDirectory() as t:
+            R = Run(t); R.model(fake_model())
+            pre = espn("E9", "2026-11-08T18:00Z", ("Denver", "Broncos", "DEN"), ("Kansas City", "Chiefs", "KC"), state="pre", quotes={"DraftKings": DK})
+            R.feed([pre])
+            R.doc("2026-11-07", "NFL", [ledger_game("G9", "2026-11-08T13:00:00-05:00", "Broncos", "Chiefs", eid="E9")])
+            _, files, _ = R.go()
+            pg = files[("pregame", "2026-11-07")]
+            self.assertEqual(len(pg["preds"]["G9"]), 1)
+            first = pg["preds"]["G9"][0]
+            self.assertEqual(first["model"], "ledger-v1"); self.assertEqual(first["version"], "2026-11-04T09:17Z")
+            R.pregame("2026-11-07", pg)
+            m = fake_model(); m["updatedAt"] = "2026-11-06T09:17Z"; m["leagues"]["NFL"]["ratings"]["KC"]["r"] = 3.0
+            R.model(m)
+            _, files, _ = R.go("2026-11-06T10:00:00+00:00")
+            preds = files[("pregame", "2026-11-07")]["preds"]["G9"]
+            self.assertEqual(len(preds), 2)
+            self.assertEqual(preds[0], first)                                       # the earlier record is untouched
+            self.assertTrue(AS.verify_chain(preds, AS.PRED_KEYS))
+
+
+def fake_shadow(version="2026-11-04T10:00:00Z", kc_qb=0.15):
+    nxt = lambda side, opp, qb: {"date": "2026-11-08", "week": 10, "side": side, "opp": opp, "qb": qb, "qb_chg": 0.0, "qb_name": "QB",
+                                  "rest": 7.0, "dome": 0, "wind": 8.0, "temp": 60.0, "post": 0}
+    return {"model": "lab-1-C", "name": "C · Efficiency + quarterback", "version": "lab-1", "updatedAt": version, "asof": "2026-11-03T00:15:00-05:00",
+            "pairs": [["o_epa", "d_epa"]], "fill": {"wind": 8.0, "temp": 60.0},
+            "margin": {"features": ["m_o_epa", "hfa", "qb"], "mean": [0, 0, 0], "scale": [1, 1, 1], "coef": [10, 2, 5], "intercept": 0.0},
+            "total": {"features": ["t_o_epa", "pace"], "mean": [0, 120], "scale": [1, 1], "coef": [20, 0.1], "intercept": 44.0},
+            "test": {"qualifies": False},
+            "teams": {"KC": {"snap": {"o_epa": 0.1, "d_epa": -0.05, "o_pace": 64}, "qb_last": 0.15, "dome_home": 0, "next": nxt("home", "DEN", kc_qb)},
+                      "DEN": {"snap": {"o_epa": 0.0, "d_epa": 0.02, "o_pace": 62}, "qb_last": 0.05, "dome_home": 0, "next": nxt("away", "KC", 0.05)}}}
+
+
+class ShadowModel(unittest.TestCase):
+    """Assignment 6: the lab's candidate is recorded before kickoff for evaluation only, beside the existing model."""
+
+    def test_numbers_from_published_team_values(self):
+        e = espn("E9", "2026-11-08T18:00Z", ("Denver", "Broncos", "DEN"), ("Kansas City", "Chiefs", "KC"), state="pre")
+        ko = AS.when("2026-11-08T13:00:00-05:00")
+        x = AS.shadow_numbers(fake_shadow(), "NFL", e, False, ko)
+        self.assertEqual(x, {"m": 4.2, "t": 46.0})                              # 10*0.17 + 2 + 5*0.10; 44 + 20*0.07 + 0.1*6
+        self.assertEqual(AS.shadow_numbers(fake_shadow(), "NFL", e, True, ko)["m"], -4.2)
+        # not the team's next listed game: the last starter's value and no listed rest
+        S = fake_shadow(kc_qb=0.0)
+        self.assertEqual(AS.shadow_numbers(S, "NFL", e, False, AS.when("2026-11-15T13:00:00-05:00"))["m"], 4.2)
+        self.assertEqual(AS.shadow_numbers(S, "NFL", e, False, ko)["m"], 3.5)       # 1.7 + 2 + 5*(0.0-0.05), to 0.1
+        self.assertIsNone(AS.shadow_numbers(S, "FBS", e, False, ko))
+        S["margin"]["features"].append("unknown_feature"); S["margin"]["mean"].append(0); S["margin"]["scale"].append(1); S["margin"]["coef"].append(1)
+        self.assertIsNone(AS.shadow_numbers(S, "NFL", e, False, ko))
+
+    def test_recorded_before_kickoff_kept_apart_and_graded(self):
+        with tempfile.TemporaryDirectory() as t:
+            R = Run(t); R.model(fake_model()); R.players(fake_players()); R.shadow(fake_shadow())
+            close = {"hm": 3.5, "tot": 44.5, "book": "DraftKings"}
+            pre = espn("E9", "2026-11-08T18:00Z", ("Denver", "Broncos", "DEN"), ("Kansas City", "Chiefs", "KC"), state="pre", quotes={"DraftKings": DK})
+            R.feed([pre])
+            g = ledger_game("G9", "2026-11-08T13:00:00-05:00", "Broncos", "Chiefs", eid="E9")
+            R.doc("2026-11-07", "NFL", [g])
+            _, files, _ = R.go()
+            pg = files[("pregame", "2026-11-07")]
+            preds = pg["preds"]["G9"]
+            self.assertEqual([p["model"] for p in preds], ["ledger-v1", "lab-1-C"])
+            self.assertEqual((preds[1]["m"], preds[1]["t"], preds[1]["asof"]), (4.2, 46.0, "2026-11-03T00:15:00-05:00"))
+            self.assertTrue(AS.verify_chain(preds, AS.PRED_KEYS))
+            self.assertNotIn("sm", pg["games"]["G9"])                               # never shown with the game
+            self.assertEqual(pg["gates"]["shadow"]["model"], "lab-1-C")
+            R.pregame("2026-11-07", pg)
+            _, files, _ = R.go("2026-11-05T17:00:00+00:00")                         # nothing changed: nothing appended
+            self.assertNotIn("preds", files.get(("pregame", "2026-11-07"), {}))
+            R.shadow(fake_shadow("2026-11-06T10:00:00Z", kc_qb=0.0))                 # new numbers: only the shadow record is added
+            _, files, _ = R.go("2026-11-06T17:00:00+00:00")
+            preds = files[("pregame", "2026-11-07")]["preds"]["G9"]
+            self.assertEqual([p["model"] for p in preds], ["ledger-v1", "lab-1-C", "lab-1-C"])
+            self.assertEqual(preds[2]["m"], 3.5)
+            self.assertTrue(AS.verify_chain(preds, AS.PRED_KEYS))
+            pg = files[("pregame", "2026-11-07")]; R.pregame("2026-11-07", pg)
+            live = dict(pre, state="in", status="STATUS_IN_PROGRESS", close=close, qclose={"DraftKings": DK})
+            live["away"] = dict(pre["away"], score=7); live["home"] = dict(pre["home"], score=10)
+            R.feed([live])
+            _, files, _ = R.go("2026-11-08T18:30:00+00:00")
+            ch = files[("slates/2026-11-07/leagues", "NFL")]["games"]["G9"]
+            self.assertEqual(ch["lock"]["lm"]["model"], "ledger-v1")
+            self.assertEqual((ch["lock"]["sm"]["model"], ch["lock"]["sm"]["m"]), ("lab-1-C", 3.5))
+            g.update(ch); R.doc("2026-11-07", "NFL", [g])
+            fin = espn("E9", "2026-11-08T18:00Z", ("Denver", "Broncos", "DEN"), ("Kansas City", "Chiefs", "KC"), sc=(20, 27),
+                       lines=((7, 3, 7, 3), (7, 10, 3, 7)), close=close, qclose={"DraftKings": DK})
+            R.feed([fin])
+            _, files, _ = R.go("2026-11-08T22:00:00+00:00")
+            res = files[("results", "2026-11-07")]["games"]["G9"]
+            self.assertEqual(res["sme"], [0.0, None, 1.5, "W"])                      # same as the close; 46 vs 44.5, Over won (47)
+            self.assertEqual(res["smv"], "lab-1-C")
+            self.assertEqual(res["lme"], [1.5, "W", 1.3, "W"])                       # the existing model is unaffected
 
 
 if __name__ == "__main__":

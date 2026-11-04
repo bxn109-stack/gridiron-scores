@@ -245,3 +245,14 @@ test('bankroll path tracks the drawdown from the peak', () => {
   const s = C.summarize([{ state:'W', stake:5, profit:4.55 }, { state:'L', stake:5, profit:-5 }, { state:'W*', stake:5, profit:2 }, { state:'V', stake:5, profit:0 }, { state:null, stake:5 }]);
   assert.deepEqual([s.n, s.W, s.L, s.P, s.open], [4, 2, 1, 1, 1]); close(s.profit, 1.55); close(s.staked, 20);
 });
+
+/* ---------- value only from a validated model (Assignment 5) ---------- */
+test('without evidence or a validated model nothing is value', () => {
+  const d = C.amToDec(105);
+  const plain = C.evaluate({ pMkt: 0.5, dec: d, priceKind: 'quote', fresh: true });
+  assert.equal(plain.verdict, 'possible');                       // a good price alone is not value
+  const model = C.evaluate({ pMkt: 0.53, dec: d, priceKind: 'quote', fresh: true, validated: true });
+  assert.equal(model.verdict, 'value');
+  const thin = C.evaluate({ pMkt: 0.49, dec: d, priceKind: 'quote', fresh: true, validated: true });   // EV +0.45% < 1%
+  assert.equal(thin.verdict, 'possible');
+});

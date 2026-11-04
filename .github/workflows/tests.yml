@@ -16,7 +16,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Python tests (robot, odds adapters, grader)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Model lab packages
+        run: python3 -m pip install -q numpy pandas scikit-learn scipy
+      - name: Python tests (robot, odds adapters, grader, model lab)
         run: python3 -W error::ResourceWarning -m unittest discover -s tests -v
       - name: JavaScript tests (betting math used by the page)
         run: node --test web/*.test.js

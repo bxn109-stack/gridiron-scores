@@ -9,13 +9,20 @@ DIR holds league docs saved by ArtifactData (out_dir): DIR/slates/<slate>/league
 and optionally DIR/results/<slate>.json. The script:
   - matches each started ledger game to its ESPN game (saves the ESPN id as `eid` for next time),
   - writes st / sc / clk, and on final also per (quarter scores) and pv (prop results),
-  - grades tracked games (su, lean, star, props) exactly as the runbook says, from a pick snapshot (`lock`) taken the
-    first time the game is seen after kickoff, so later edits cannot change a graded pick,
+  - grades tracked games (su, lean, star, props) exactly as the runbook says, from a pick snapshot (`lock`) made the
+    first time the game is seen after kickoff from the last pick version saved before kickoff (see below), so later
+    edits cannot change a graded pick,
   - reads the season archive (scores/final/<date>.json) for games older than the live feed's 4-day window,
   - marks a prop unresolved (U) when the player or market is missing from the final box score a day after the game,
   - writes pregame/<slate>: sportsbook quotes (current, opening, closing), an append-only history of the picks, the
     chance of landing on each nearby number (push tables), the Ledger Model's numbers and NFL prop projections, plus
     the model gates (from model/results in this repo), so the page can price pushes and check each phase's gate,
+  - keeps two append-only, hash-chained records before kickoff: every version of the pick (snaps) and every model
+    prediction with its model version and data cutoff (preds). A pick is graded from the last version saved before
+    kickoff and marked verified; a pick with no pregame copy is graded from what was there at kickoff but marked
+    unverified, and a model prediction made after kickoff never gets pregame credit. The NFL shadow model (the model
+    lab's candidate, from model/results/nfl_shadow.json) is recorded the same way for evaluation only: it is never
+    shown with a game and never feeds a pick, a value verdict or a stake,
   - records at the lock what the closing market and the model said, so the page can measure them after the game,
   - writes one update file per changed doc plus meta/live, and prints a JSON manifest:
       [{"op": "update"|"set", "collection": ..., "doc_id": ..., "file_path": ...}, ...]
@@ -59,6 +66,12 @@ def load(src):
 
 def when(s):
     return dt.datetime.fromisoformat(s.replace("Z", "+00:00")) if s else None
+
+
+def when_any(s):
+    """A timestamp with or without a zone (nflverse game times are US Eastern without one)."""
+    t = dt.datetime.fromisoformat(str(s).replace(".000Z", "Z").replace("Z", "+00:00"))
+    return t if t.tzinfo else t.replace(tzinfo=ET)
 
 
 # ---------- team matching ----------
@@ -289,6 +302,29 @@ def pick_snapshot(g):
             "props": [{k: p.get(k) for k in ("pl", "mk", "ln", "side", "odds")} for p in (g.get("props") or [])]}
 
 
+def chain(prev, body, at):
+    """Hash linking each pregame record to the one before it, so an edited or removed record is detectable."""
+    import hashlib
+    raw = f"{prev or ''}|{json.dumps(body, sort_keys=True, separators=(',', ':'))}|{at}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def verify_chain(entries, keys):
+    """True when every record's hash matches its content and the record before it."""
+    prev = None
+    for x in entries or []:
+        if "h" not in x:
+            return False
+        if chain(prev, {k: x.get(k) for k in keys}, x.get("at")) != x["h"]:
+            return False
+        prev = x["h"]
+    return True
+
+
+SNAP_KEYS = ("line", "lean", "star", "props")
+PRED_KEYS = ("model", "version", "asof", "m", "t", "pp")
+
+
 def lock_diff(g, lock):
     cur = pick_snapshot(g)
     return [k for k in ("line", "lean", "star", "props") if cur.get(k) != lock.get(k)]
@@ -381,6 +417,47 @@ def model_numbers(M, lg, e, swapped):
     m = h["r"] - a["r"] + hfa
     t = 2 * (st_.get("lg") or 0) + h["o"] + a["o"] - h["d"] - a["d"]
     return {"m": round(-m if swapped else m, 1), "t": round(t, 1), "v": (M or {}).get("updatedAt")}
+
+
+def shadow_numbers(S, lg, e, swapped, ko=None):
+    """The shadow model's margin (ledger home minus away) and total for an NFL game, computed from the model lab's
+    published team numbers (model/results/nfl_shadow.json); None when a team or a feature is missing.
+    Recorded before kickoff for evaluation only: it never feeds a pick, a value verdict or a stake."""
+    if lg != "NFL" or not S or not S.get("teams") or not S.get("margin") or not S.get("total"):
+        return None
+    T = S["teams"]
+    h, a = T.get((e.get("home") or {}).get("abbr")), T.get((e.get("away") or {}).get("abbr"))
+    if not h or not a:
+        return None
+    date = et_date(ko).isoformat() if ko else None
+
+    def nxt(t, side):          # this is the team's next game in the lab's schedule: use its listed starter and rest
+        n = t.get("next") or {}
+        return n if date and n.get("date") == date and n.get("side") == side else None
+    hn, an = nxt(h, "home"), nxt(a, "away")
+    hq, aq = (hn or {}).get("qb", h.get("qb_last")), (an or {}).get("qb", a.get("qb_last"))
+    hc, ac = (hn or {}).get("qb_chg", 0.0), (an or {}).get("qb_chg", 0.0)
+    if hq is None or aq is None:
+        return None
+    dome = (hn or {}).get("dome", h.get("dome_home", 0))
+    fill = S.get("fill") or {}
+    x = {"hfa": 0 if e.get("neutral") else 1, "rest": max(-7.0, min(7.0, (hn or {}).get("rest", 7.0) - (an or {}).get("rest", 7.0))) / 7,
+         "post": (hn or {}).get("post", 0), "dome": dome,
+         "wind": 0.0 if dome else (hn or {}).get("wind", fill.get("wind", 0.0)), "temp": 70.0 if dome else (hn or {}).get("temp", fill.get("temp", 60.0)),
+         "qb": hq - aq, "qb_chg": hc - ac, "qb_sum": hq + aq}
+    hs, as_ = h.get("snap") or {}, a.get("snap") or {}
+    try:
+        for o, d in S.get("pairs") or []:
+            x[f"m_{o}"] = (hs[o] + as_[d]) - (as_[o] + hs[d])
+            x[f"t_{o}"] = (hs[o] + as_[d]) + (as_[o] + hs[d])
+        x["pace"] = hs["o_pace"] + as_["o_pace"]
+
+        def lin(p):
+            return p["intercept"] + sum(c * (x[f] - mu) / s for f, mu, s, c in zip(p["features"], p["mean"], p["scale"], p["coef"]))
+        m, t = lin(S["margin"]), lin(S["total"])
+    except (KeyError, TypeError, ZeroDivisionError):
+        return None
+    return {"m": round(-m if swapped else m, 1), "t": round(t, 1)}
 
 
 def prop_market(mk):
@@ -520,7 +597,7 @@ def model_result(lm, close_hm, close_tot, sc):
     return out
 
 
-def gates_summary(M, P):
+def gates_summary(M, P, S=None):
     """The small part of the model files the page needs: each gate's verdict and headline numbers."""
     out = {}
     for name, L in ((M or {}).get("leagues") or {}).items():
@@ -534,6 +611,8 @@ def gates_summary(M, P):
     meta = {"updatedAt": (M or {}).get("updatedAt"), "leagues": out}
     if P:
         meta["props"] = {"updatedAt": P.get("updatedAt"), "throughWeek": P.get("throughWeek"), "coverage": P.get("coverage")}
+    if S:
+        meta["shadow"] = {k: S.get(k) for k in ("model", "name", "updatedAt", "asof", "test", "check")}
     return meta
 
 
@@ -553,6 +632,7 @@ def main():
     ap.add_argument("--now", default=None, help="ISO time to use instead of the clock (testing)")
     ap.add_argument("--model", default=f"{RAW}/model/results/ledger_model.json", help="Ledger Model results (URL or path)")
     ap.add_argument("--players", default=f"{RAW}/model/results/nfl_players.json", help="NFL prop projections (URL or path)")
+    ap.add_argument("--shadow", default=f"{RAW}/model/results/nfl_shadow.json", help="shadow model team numbers (URL or path)")
     args = ap.parse_args()
     now = when(args.now) if args.now else dt.datetime.now(UTC)
     now_iso = now.astimezone(UTC).isoformat(timespec="seconds")
@@ -568,9 +648,9 @@ def main():
     by_id = {e["id"]: e for e in pool}
     feed_age = (now - when(feed.get("updatedAt"))).total_seconds() / 60 if feed.get("updatedAt") else None
     checked = feed.get("checkedAt") or feed.get("updatedAt")
-    M = P = None
+    M = P = S = None
     if args.pregame:
-        for name in ("model", "players"):
+        for name in ("model", "players", "shadow"):
             try:
                 v = load(getattr(args, name))
             except Exception as ex:
@@ -578,9 +658,11 @@ def main():
                 v = None
             if name == "model":
                 M = v
-            else:
+            elif name == "players":
                 P = v
-    gates = gates_summary(M, P) if M or P else None
+            else:
+                S = v
+    gates = gates_summary(M, P, S) if M or P or S else None
 
     # games older than the live feed's window come from the season archive (one file per US Eastern date)
     doc_paths = sorted(glob.glob(os.path.join(args.docs, "slates", "*", "leagues", "*.json")))
@@ -616,7 +698,7 @@ def main():
         return box_cache[eid]
 
     manifest, n_upd, n_grade, unmatched, prop_gaps, results_by_slate = [], 0, 0, [], 0, {}
-    n_lock, n_late, n_void, pregame = 0, 0, 0, {}
+    n_lock, n_late, n_void, n_ver, pregame = 0, 0, 0, 0, {}
     for path in doc_paths:
         slate, lgname = path.split(os.sep)[-3], os.path.basename(path)[:-5]
         doc = load(path) or {}
@@ -637,18 +719,19 @@ def main():
                 e, swapped = match(g, pool)
             # pregame record: quotes from the feed and an append-only history of the pick before kickoff
             old_snaps = list(((pg["_old"].get("snaps") or {}).get(gid)) or [])
+            old_preds = list(((pg["_old"].get("preds") or {}).get(gid)) or [])
             if ko > now:
                 snap = pick_snapshot(g)
-                last = {k: v for k, v in (old_snaps[-1] if old_snaps else {}).items() if k != "at"}
+                last = {k: v for k, v in (old_snaps[-1] if old_snaps else {}).items() if k not in ("at", "h")}
                 if snap != last:
-                    pg["snaps"][gid] = old_snaps + [dict(snap, at=now_iso)]
+                    pg["snaps"][gid] = old_snaps + [dict(snap, at=now_iso, h=chain(old_snaps[-1].get("h") if old_snaps else None, snap, now_iso))]
             old_ent = (pg["_old"].get("games") or {}).get(gid) or {}
-            if e and (e.get("quotes") or e.get("qopen") or e.get("qclose") or (args.pregame and ko > now and (M or P))):
+            if e and (e.get("quotes") or e.get("qopen") or e.get("qclose") or (args.pregame and ko > now and (M or P or S))):
                 ent = {"state": e.get("state"), "quotes": e.get("quotes") if e.get("state") == "pre" else None,
                        "open": e.get("qopen"), "close": e.get("qclose")}
                 if swapped:
                     ent = {k: swap_quotes(v) if k != "state" else v for k, v in ent.items()}
-                if ko > now and (M or P):
+                if ko > now and (M or P or S):
                     # numbers that only make sense before kickoff; after it, the last ones stay as they were
                     close_e = e.get("close")
                     if close_e and swapped:
@@ -663,6 +746,24 @@ def main():
                         ent["lm"] = lm
                     if g["lg"] == "NFL" and P and props:
                         ent["pp"] = [prop_projection(P, p) for p in props]
+                    # immutable prediction records: model, version, data cutoff, numbers. Each model's record is appended
+                    # only when its numbers change; the chain links every record of the game in order.
+                    L_ = ((M or {}).get("leagues") or {}).get(model_league(g["lg"]) or "") or {}
+                    recs = []
+                    rec = {"model": "ledger-v1", "version": (M or {}).get("updatedAt"), "asof": (L_.get("state") or {}).get("asof"),
+                           "m": (lm or {}).get("m"), "t": (lm or {}).get("t"), "pp": [(x or {}).get("p") for x in ent.get("pp") or []] or None}
+                    if lm or rec["pp"]:
+                        recs.append(rec)
+                    sm = shadow_numbers(S, g["lg"], e, swapped, ko)
+                    if sm:      # shadow model: saved for evaluation, never shown with the game or used for a pick
+                        recs.append({"model": S.get("model"), "version": S.get("updatedAt"), "asof": S.get("asof"), "m": sm["m"], "t": sm["t"], "pp": None})
+                    hist = list(old_preds)
+                    for rec in recs:
+                        prev = next((x for x in reversed(hist) if x.get("model") == rec["model"]), None)
+                        if {k: (prev or {}).get(k) for k in PRED_KEYS} != rec:
+                            hist.append(dict(rec, at=now_iso, h=chain(hist[-1].get("h") if hist else None, rec, now_iso)))
+                    if len(hist) > len(old_preds):
+                        pg.setdefault("preds", {})[gid] = hist
                 else:
                     for k in ("pmf", "lm", "pp"):
                         if old_ent.get(k) is not None:
@@ -682,24 +783,35 @@ def main():
                 if swapped:
                     ch["eswap"] = True
             state = e.get("state")
-            # lock the pick the first time the game is seen after kickoff; grading uses the lock from then on
+            # lock the pick once the game has started. Grading uses the lock from then on. The lock is the last version
+            # of the pick saved BEFORE kickoff (verified); with no pregame copy it is the pick as found, marked unverified.
             lock = g.get("lock")
             if not lock and g.get("tracked") and (ko <= now or state in ("in", "post")):
                 late = now - ko > dt.timedelta(hours=12)
-                lock = dict(pick_snapshot(g), at=now_iso,
-                            src="back-filled after the game (no snapshot from before kickoff)" if late else "first score update after kickoff")
+                before = [x for x in old_snaps if when(x.get("at")) and when(x["at"]) < ko]
+                if before:
+                    lock = dict({k: before[-1].get(k) for k in SNAP_KEYS}, at=now_iso, src="last version saved before kickoff",
+                                pre=before[-1]["at"], v=True, h=before[-1].get("h"), chain_ok=verify_chain(before, SNAP_KEYS))
+                    n_ver += 1
+                else:
+                    lock = dict(pick_snapshot(g), at=now_iso, v=False,
+                                src="back-filled after the game (no copy saved before kickoff)" if late else "no copy saved before kickoff; as found at the first update after it")
                 if late:
                     lock["late"] = True
                     n_late += 1
-                if old_snaps:
-                    before = [x for x in old_snaps if when(x.get("at")) and when(x["at"]) <= ko]
-                    if before:
-                        lock["pre"] = before[-1]["at"]
-                pre_ent = pg["games"].get(gid) or old_ent
-                if not late and pre_ent.get("lm"):
-                    lock["lm"] = pre_ent["lm"]                       # what the model said before kickoff
-                if not late and pre_ent.get("pp"):
-                    lock["pp"] = [(x or {}).get("p") for x in pre_ent["pp"]][:len(lock["props"])]
+                # the model's last prediction made before kickoff from data that ended before kickoff; none = unavailable
+                okp = [x for x in old_preds if when(x.get("at")) and when(x["at"]) < ko and (not x.get("asof") or when_any(x["asof"]) < ko)]
+                v1p = [x for x in okp if x.get("model") in (None, "ledger-v1")]
+                if v1p:
+                    lp = v1p[-1]
+                    if lp.get("m") is not None:
+                        lock["lm"] = {"m": lp["m"], "t": lp.get("t"), "at": lp["at"], "version": lp.get("version"), "model": lp.get("model")}
+                    if lp.get("pp"):
+                        lock["pp"] = list(lp["pp"])[:len(lock["props"] or [])]
+                shp = [x for x in okp if x.get("model") not in (None, "ledger-v1") and x.get("m") is not None]
+                if shp:
+                    lp = shp[-1]
+                    lock["sm"] = {"m": lp["m"], "t": lp.get("t"), "at": lp["at"], "version": lp.get("version"), "model": lp.get("model")}
                 ch["lock"] = lock
                 n_lock += 1
             if lock:
@@ -781,7 +893,8 @@ def main():
                                 cnt[r] += 1
                         l = gl.get("lean") or {}
                         results[gid] = {"lg": g["lg"], "su": su, "lean": lean, "star": star,
-                                        "conf": l.get("conf"), "mk": l.get("mk"), "props": cnt, "locked": bool(lock)}
+                                        "conf": l.get("conf"), "mk": l.get("mk"), "props": cnt, "locked": bool(lock),
+                                        "v": bool((lock or {}).get("v"))}
                         cv = ch.get("clv") or g.get("clv")
                         if cv:
                             if cv.get("pts") is not None:
@@ -796,6 +909,15 @@ def main():
                             mr = model_result(lock["lm"], chm, cl.get("tot"), sc)
                             if mr:
                                 results[gid]["lme"] = mr
+                        if lock and lock.get("sm"):
+                            cl = e.get("close") or {}
+                            chm = cl.get("hm")
+                            if chm is not None and swapped:
+                                chm = -chm
+                            mr = model_result(lock["sm"], chm, cl.get("tot"), sc)
+                            if mr:
+                                results[gid]["sme"] = mr
+                                results[gid]["smv"] = lock["sm"].get("model")
                         if lock and lock.get("pp"):
                             rows = []
                             for i, pp_ in enumerate(lock["pp"]):
@@ -836,10 +958,12 @@ def main():
             extra["coverage"] = cov
         if gates and gates != pg["_old"].get("gates"):
             extra["gates"] = gates
-        if not pg["games"] and not pg["snaps"] and not extra:
+        if not pg["games"] and not pg["snaps"] and not pg.get("preds") and not extra:
             continue
         exists = os.path.exists(os.path.join(args.docs, "pregame", f"{slate}.json"))
         body = dict({"slate": slate, "updatedAt": now_iso, "feedCheckedAt": checked, "games": pg["games"], "snaps": pg["snaps"]}, **extra)
+        if pg.get("preds"):
+            body["preds"] = pg["preds"]
         f = _write(args.out, f"{slate}__pregame.json", body)
         manifest.append({"op": "update" if exists else "set", "collection": "pregame", "doc_id": slate, "file_path": f})
 
@@ -857,7 +981,7 @@ def main():
     if n_void:
         bits.append(f"{n_void} prop{'s' if n_void != 1 else ''} unresolved (player or market not in the box score)")
     if n_lock:
-        bits.append(f"{n_lock} pick{'s' if n_lock != 1 else ''} locked" + (f" ({n_late} back-filled after the game)" if n_late else " at kickoff"))
+        bits.append(f"{n_lock} pick{'s' if n_lock != 1 else ''} locked, {n_ver} from a copy saved before kickoff" + (f" ({n_late} back-filled after the game)" if n_late else ""))
     if arch_n:
         bits.append(f"{arch_n} older games read from the season archive")
     if feed_age is not None and feed_age > 45:

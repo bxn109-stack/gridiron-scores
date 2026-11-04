@@ -19,9 +19,16 @@ concurrency:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Model lab packages
+        run: python3 -m pip install -q numpy pandas scikit-learn scipy
 
       # Raw College Football Data downloads stay in this private cache, never in the repo.
       - uses: actions/cache@v4
@@ -47,6 +54,25 @@ jobs:
         continue-on-error: true
         timeout-minutes: 10
         run: python3 model/nfl_props.py
+
+      # NFL model lab: public nflverse play-by-play reduced to team-game and passer-game tables (cached, never committed)
+      - name: NFL play-by-play tables
+        id: nfldata
+        continue-on-error: true
+        timeout-minutes: 15
+        run: python3 model/nfl_data.py --refresh-last
+
+      - name: NFL model lab (walk-forward comparison of every candidate)
+        if: github.event_name != 'schedule' && steps.nfldata.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 25
+        run: python3 model/nfl_lab.py
+
+      - name: NFL shadow model numbers (frozen settings)
+        if: github.event_name == 'schedule' && steps.nfldata.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: python3 model/nfl_lab.py --shadow-only
 
       - name: Run college efficiency model
         if: github.event_name != 'schedule'
