@@ -369,7 +369,7 @@ def main():
         return box_cache[eid]
 
     manifest, n_upd, n_grade, unmatched, prop_gaps, results_by_slate = [], 0, 0, [], 0, {}
-    n_lock, n_void, pregame = 0, 0, {}
+    n_lock, n_late, n_void, pregame = 0, 0, 0, {}
     for path in doc_paths:
         slate, lgname = path.split(os.sep)[-3], os.path.basename(path)[:-5]
         doc = load(path) or {}
@@ -418,7 +418,12 @@ def main():
             # lock the pick the first time the game is seen after kickoff; grading uses the lock from then on
             lock = g.get("lock")
             if not lock and g.get("tracked") and (ko <= now or state in ("in", "post")):
-                lock = dict(pick_snapshot(g), at=now_iso, src="first score update after kickoff")
+                late = now - ko > dt.timedelta(hours=12)
+                lock = dict(pick_snapshot(g), at=now_iso,
+                            src="back-filled after the game (no snapshot from before kickoff)" if late else "first score update after kickoff")
+                if late:
+                    lock["late"] = True
+                    n_late += 1
                 if old_snaps:
                     before = [x for x in old_snaps if when(x.get("at")) and when(x["at"]) <= ko]
                     if before:
@@ -534,7 +539,7 @@ def main():
     if n_void:
         bits.append(f"{n_void} prop{'s' if n_void != 1 else ''} unresolved (player or market not in the box score)")
     if n_lock:
-        bits.append(f"{n_lock} pick{'s' if n_lock != 1 else ''} locked at kickoff")
+        bits.append(f"{n_lock} pick{'s' if n_lock != 1 else ''} locked" + (f" ({n_late} back-filled after the game)" if n_late else " at kickoff"))
     if arch_n:
         bits.append(f"{arch_n} older games read from the season archive")
     if feed_age is not None and feed_age > 45:

@@ -109,6 +109,8 @@ class Grading(unittest.TestCase):
             self.assertEqual(ch["gr"]["props"], ["W", "U"])      # Mims not in the box score a week later: unresolved
             self.assertIn("lock", ch)
             self.assertEqual(ch["lock"]["lean"]["ln"], 3)
+            self.assertTrue(ch["lock"]["late"])                 # taken 10 days after kickoff: marked as a back-fill
+            self.assertIn("back-filled", ch["lock"]["src"])
             res = files[("results", "2026-10-24")]["games"]["NFL-broncos-chiefs"]
             self.assertEqual(res["props"], {"W": 1, "L": 0, "P": 0, "U": 1})
             self.assertTrue(res["locked"])
