@@ -1,6 +1,6 @@
 # Ledger Model
 
-Updated 2026-11-04T18:03Z. Walk-forward points ratings; settings tuned on early seasons, scored on later seasons never seen while tuning. Break-even at −110 is 52.4%.
+Updated 2026-11-04T22:06Z. Walk-forward points ratings; settings tuned on early seasons, scored on later seasons never seen while tuning. Break-even at −110 is 52.4%.
 
 ## NFL
 
