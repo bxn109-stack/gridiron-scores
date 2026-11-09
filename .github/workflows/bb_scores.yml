@@ -1,0 +1,50 @@
+name: Fetch basketball scores
+
+on:
+  schedule:
+    # Every 15 minutes during US game windows (UTC: 10 AM to 2:59 AM Eastern). Each run keeps going on its own
+    # (every 5 minutes) while games are on.
+    - cron: "*/15 0-6,15-23 * * *"
+    # One full sweep a day: the next two days' schedule and lines, ESPN win chances, and archive catch-up.
+    - cron: "37 11 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["fetch_bb.py", ".github/workflows/bb_scores.yml"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fetch-bb
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch ESPN basketball scores (every 5 minutes while games are on)
+        env:
+          FULL: ${{ github.event_name != 'schedule' || github.event.schedule == '37 11 * * *' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          save() {
+            git add -A scores/bb
+            if git diff --cached --quiet; then return 0; fi
+            git commit -q -m "Basketball scores $(date -u +%Y-%m-%dT%H:%MZ)"
+            git pull -q --rebase origin "${GITHUB_REF_NAME}" || true
+            git push -q || echo "push failed; will retry next loop"
+          }
+          start=$(date +%s)
+          full="$FULL"
+          while true; do
+            if [ "$full" = "true" ]; then python3 fetch_bb.py --full; full=false; else python3 fetch_bb.py; fi
+            save
+            if ! python3 fetch_bb.py --busy; then echo "No games on right now; stopping."; break; fi
+            if [ $(( $(date +%s) - start )) -gt 19800 ]; then echo "Time limit reached; the next scheduled run takes over."; break; fi
+            sleep 300
+          done
