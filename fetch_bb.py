@@ -11,6 +11,10 @@ Writes
                                 game = the football robot's format (teams, score, period scores, status, quotes with
                                 opening and closing numbers) plus `pred` = ESPN's pregame win chance for the home team.
   scores/bb/status.json         {checkedAt, updatedAt, dates} so the grader can tell how fresh the feed is
+  box/bb/<YYYY-MM-DD>.json      player box scores for that date's finished games (player props are graded from these):
+                                {date, updatedAt, games: {<espnId>: {lg, teams: {<abbr>: {id, home, st}}, players: [...]}}}
+                                player = {n, tm, min, pts, reb, ast, stl, blk, to, tpm, fgm, fga, ftm, fta, oreb, dreb,
+                                pf, start, fp}; fp = PrizePicks basketball fantasy score
 
 Usage
   python3 fetch_bb.py          quick run: yesterday and today (ET), plus the win chance of games starting soon
@@ -43,11 +47,123 @@ PRED_MAX_PER_RUN = 400
 CHECK_EVERY_MIN = 30
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DIR = os.path.join(ROOT, "scores", "bb")
+BOX_DIR = os.path.join(ROOT, "box", "bb")
+BOX_MAX_PER_RUN = 300                  # box scores fetched per run (catch-up spreads over several runs)
 DEAD = ("STATUS_POSTPONED", "STATUS_CANCELED")
 
 
 def day_path(d):
     return os.path.join(DIR, f"{d.isoformat()}.json")
+
+
+def box_path(d):
+    return os.path.join(BOX_DIR, f"{d.isoformat()}.json")
+
+
+# ---------- box scores ----------
+# ESPN basketball box score labels -> our field names ("7-15" style values are split into made and attempted).
+PAIR = {"FG": ("fgm", "fga"), "3PT": ("tpm", "tpa"), "FT": ("ftm", "fta")}
+ONE = {"MIN": "min", "OREB": "oreb", "DREB": "dreb", "REB": "reb", "AST": "ast", "STL": "stl", "BLK": "blk",
+       "TO": "to", "PF": "pf", "PTS": "pts"}
+KEY_LABEL = {"minutes": "MIN", "fieldGoalsMade-fieldGoalsAttempted": "FG", "threePointFieldGoalsMade-threePointFieldGoalsAttempted": "3PT",
+             "freeThrowsMade-freeThrowsAttempted": "FT", "offensiveRebounds": "OREB", "defensiveRebounds": "DREB",
+             "rebounds": "REB", "assists": "AST", "steals": "STL", "blocks": "BLK", "turnovers": "TO", "fouls": "PF",
+             "points": "PTS", "totalTurnovers": "TO"}
+
+
+def fantasy_bb(p):
+    """PrizePicks basketball fantasy score: points 1, rebounds 1.2, assists 1.5, blocks 3, steals 3, turnovers -1."""
+    g = lambda k: p.get(k) or 0
+    return round(g("pts") + 1.2 * g("reb") + 1.5 * g("ast") + 3 * g("blk") + 3 * g("stl") - g("to"), 2)
+
+
+def _put(p, label, v):
+    label = KEY_LABEL.get(label, label)
+    if label in PAIR:
+        s = str(v or "")
+        if "-" in s:
+            a, b = (FS.to_int(x) for x in s.split("-", 1))
+            if a is not None and b is not None:
+                p[PAIR[label][0]], p[PAIR[label][1]] = a, b
+        return
+    f = ONE.get(label)
+    if f:
+        n = FS.to_int(str(v).split(":")[0]) if f == "min" else FS.to_int(v)
+        if n is not None:
+            p[f] = n
+
+
+def parse_box_bb(summary):
+    """ESPN game summary -> {teams: {abbr: {id, home, st}}, players: [...]} or None (no box score yet)."""
+    box = (summary or {}).get("boxscore") or {}
+    players, teams = [], {}
+    homes = {}
+    for c in (((summary or {}).get("header") or {}).get("competitions") or [{}])[0].get("competitors") or []:
+        homes[str((c.get("team") or {}).get("id"))] = c.get("homeAway") == "home"
+    for t in box.get("teams") or []:
+        tm = t.get("team") or {}
+        st = {}
+        for s in t.get("statistics") or []:
+            lab = KEY_LABEL.get(s.get("name")) or s.get("abbreviation") or s.get("label")
+            if lab:
+                _put(st, lab, s.get("displayValue"))
+        teams[tm.get("abbreviation") or str(tm.get("id"))] = {"id": str(tm.get("id")), "home": homes.get(str(tm.get("id"))), "st": st}
+    for side in box.get("players") or []:
+        abbr = (side.get("team") or {}).get("abbreviation")
+        for cat in side.get("statistics") or []:
+            labels = cat.get("labels") or []
+            keys = cat.get("keys") or cat.get("names") or []
+            for a in cat.get("athletes") or []:
+                ath = a.get("athlete") or {}
+                stats = a.get("stats") or []
+                if a.get("didNotPlay") or not stats:
+                    continue
+                p = {"n": ath.get("displayName") or ath.get("shortName"), "tm": abbr}
+                for i, v in enumerate(stats):
+                    lab = labels[i] if i < len(labels) else (keys[i] if i < len(keys) else None)
+                    if lab:
+                        _put(p, lab, v)
+                if not p.get("min") and not any(p.get(k) for k in ("pts", "reb", "ast", "fga", "fta")):
+                    continue                     # listed but did not play
+                if a.get("starter"):
+                    p["start"] = True
+                p["fp"] = fantasy_bb(p)
+                players.append(p)
+    if not players:
+        return None
+    return {"teams": teams, "players": players}
+
+
+def save_boxes(games, now_utc, fetch=None, limit=BOX_MAX_PER_RUN):
+    """Box scores for finished games that have none saved yet, one file per US Eastern date. Returns how many were saved."""
+    pause = 0.2 if fetch is None else 0
+    fetch = fetch or (lambda lg, gid: FS.get_json(f"{BASE}/{SPORT[lg]}/summary?event={gid}"))
+    by_day = {}
+    for g in games:
+        if g.get("state") == "post" and g.get("completed") and g.get("lg") in SPORT:
+            d = FS.et_date(g)
+            if d:
+                by_day.setdefault(d, []).append(g)
+    saved = 0
+    retrieved = now_utc.isoformat(timespec="seconds")
+    for d in sorted(by_day, reverse=True):
+        path = box_path(d)
+        cur = FS.read_json(path, {})
+        have = dict(cur.get("games") or {})
+        n0 = len(have)
+        for g in sorted(by_day[d], key=lambda x: x["id"]):
+            if g["id"] in have or saved >= limit:
+                continue
+            b = parse_box_bb(fetch(g["lg"], g["id"]))
+            time.sleep(pause)
+            if not b:
+                continue
+            have[g["id"]] = dict(b, lg=g["lg"])
+            saved += 1
+        if len(have) > n0:
+            os.makedirs(BOX_DIR, exist_ok=True)
+            FS.write_json(path, {"date": d.isoformat(), "updatedAt": retrieved, "games": dict(sorted(have.items()))})
+    return saved
 
 
 def parse_pred(summary):
@@ -153,7 +269,7 @@ def busy():
     return 1
 
 
-def run(full, now_utc=None, fetch_dates_fn=fetch_dates, pred_fetch=None):
+def run(full, now_utc=None, fetch_dates_fn=fetch_dates, pred_fetch=None, box_fetch=None):
     now_utc = now_utc or dt.datetime.now(dt.timezone.utc)
     retrieved = now_utc.isoformat(timespec="seconds")
     today = now_utc.astimezone(ET).date()
@@ -194,6 +310,7 @@ def run(full, now_utc=None, fetch_dates_fn=fetch_dates, pred_fetch=None):
                 cur[gid] = og
         merged[d] = cur
     n_pred = refresh_preds([g for d in days for g in merged[d].values()], now_utc, retrieved, pred_fetch)
+    n_box = save_boxes([g for d in days for g in merged[d].values()], now_utc, box_fetch)
 
     written = 0
     for d in days:
@@ -214,7 +331,7 @@ def run(full, now_utc=None, fetch_dates_fn=fetch_dates, pred_fetch=None):
                                 "leagues": [lg for lg, _, _ in FEEDS]})
     n_games = sum(len(v) for v in merged.values())
     print(f"Basketball: {n_games} games over {len(days)} dates, {written} date file(s) written, "
-          f"{n_pred} win chance(s) checked, {ok}/{asked} feeds answered")
+          f"{n_pred} win chance(s) checked, {n_box} box score(s) saved, {ok}/{asked} feeds answered")
     return written
 
 

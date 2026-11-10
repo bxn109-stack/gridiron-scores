@@ -1,0 +1,61 @@
+name: Basketball models
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every morning 12:23 UTC (7:23 AM Eastern in winter): fresh history, ratings and the Claude Model numbers before
+    # the 8:41 AM basketball board build.
+    - cron: "23 12 * * *"
+  push:
+    branches: [main]
+    paths: ["model/bb_*.py", ".github/workflows/bb_model.yml"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bb-model
+  cancel-in-progress: false
+
+jobs:
+  models:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Basketball history (scores, closing lines, team stats) and this season's older box scores
+        timeout-minutes: 90
+        run: python3 model/bb_data.py
+
+      - name: Basketball Ledger Model (ratings, backtest gates, push tables)
+        if: always() && hashFiles('model/bb_model.py') != ''
+        continue-on-error: true
+        timeout-minutes: 20
+        run: python3 model/bb_model.py
+
+      - name: Basketball Claude Model (team and player numbers, walk-forward backtest)
+        if: always() && hashFiles('model/bb_cm.py') != ''
+        continue-on-error: true
+        timeout-minutes: 20
+        run: python3 model/bb_cm.py
+
+      - name: Save results
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/bb || true
+          [ -d box/bb ] && git add box/bb || true
+          git add model/results || true
+          if git diff --cached --quiet; then echo "No new results"; exit 0; fi
+          git commit -q -m "Basketball models $(date -u +%Y-%m-%dT%H:%MZ)"
+          for i in 1 2 3; do
+            git pull -q --rebase -X theirs origin "${GITHUB_REF_NAME}" && git push -q && exit 0
+            sleep 10
+          done
+          echo "push failed"; exit 1

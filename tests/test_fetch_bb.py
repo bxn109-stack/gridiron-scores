@@ -32,11 +32,12 @@ def event(eid, date, state="pre", home=("150", "Duke", "DUKE", None), away=("349
 class BasketballRobot(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.old_dir = BB.DIR
+        self.old_dir, self.old_box = BB.DIR, BB.BOX_DIR
         BB.DIR = os.path.join(self.tmp.name, "scores", "bb")
+        BB.BOX_DIR = os.path.join(self.tmp.name, "box", "bb")
 
     def tearDown(self):
-        BB.DIR = self.old_dir
+        BB.DIR, BB.BOX_DIR = self.old_dir, self.old_box
         self.tmp.cleanup()
 
     def feed(self, events_by_lg):
@@ -82,7 +83,9 @@ class BasketballRobot(unittest.TestCase):
         BB.run(False, now, self.feed({"MBB": [event("401", "2026-11-11T00:00Z")]}), lambda lg, gid: {"predictor": {"homeTeam": {"gameProjection": "98.5"}}})
         later = dt.datetime(2026, 11, 11, 15, 0, tzinfo=UTC)          # next day
         fin = event("401", "2026-11-11T00:00Z", state="post", completed=True, hs="88", as_="61", lines=[40, 48], odds=False)
-        BB.run(False, later, self.feed({"MBB": [fin]}), lambda lg, gid: self.fail("no win chance after tip"))
+        asked = []
+        BB.run(False, later, self.feed({"MBB": [fin]}), lambda lg, gid: self.fail("no win chance after tip"),
+               lambda lg, gid: asked.append((lg, gid)) or SUMMARY)
         day = FS.read_json(os.path.join(BB.DIR, "2026-11-10.json"), {})
         g = day["games"]["401"]
         self.assertEqual((g["home"]["score"], g["away"]["score"]), (88, 61))
@@ -91,11 +94,49 @@ class BasketballRobot(unittest.TestCase):
         self.assertEqual(g["close"]["hm"], 24.5)                        # closing line kept
         self.assertIn("DraftKings", g["qclose"])
         self.assertTrue(day["complete"])                                # past date, every game over, every feed answered
+        # the finished game's box score is saved under its US Eastern date, once
+        self.assertEqual(asked, [("MBB", "401")])
+        box = FS.read_json(os.path.join(BB.BOX_DIR, "2026-11-10.json"), {})
+        self.assertEqual(box["games"]["401"]["lg"], "MBB")
+        self.assertEqual(len(box["games"]["401"]["players"]), 2)
+        BB.run(False, later + dt.timedelta(minutes=5), self.feed({"MBB": [fin]}), lambda lg, gid: {}, lambda lg, gid: self.fail("box already saved"))
+
+    def test_parse_box_bb(self):
+        b = BB.parse_box_bb(SUMMARY)
+        p = {x["n"]: x for x in b["players"]}
+        self.assertNotIn("Bench Guy", p)                                # did not play
+        d = p["Cooper Flagg"]
+        self.assertEqual((d["pts"], d["reb"], d["ast"], d["stl"], d["blk"], d["to"]), (28, 9, 4, 2, 1, 3))
+        self.assertEqual((d["fgm"], d["fga"], d["tpm"], d["tpa"], d["ftm"], d["fta"], d["min"]), (10, 18, 3, 7, 5, 6, 34))
+        self.assertTrue(d["start"])
+        self.assertEqual(d["fp"], round(28 + 1.2*9 + 1.5*4 + 3*1 + 3*2 - 3, 2))
+        self.assertEqual(b["teams"]["DUKE"]["st"]["fga"], 70)
+        self.assertEqual(b["teams"]["DUKE"]["st"]["to"], 11)
+        self.assertTrue(b["teams"]["DUKE"]["home"])
+        self.assertIsNone(BB.parse_box_bb({}))
 
     def test_nothing_before_first_slate(self):
         now = dt.datetime(2026, 11, 1, 15, 0, tzinfo=UTC)
         self.assertEqual(BB.run(False, now, self.feed({}), lambda *a: {}), 0)
         self.assertFalse(os.path.exists(BB.DIR))
+
+
+LABELS =["MIN", "FG", "3PT", "FT", "OREB", "DREB", "REB", "AST", "STL", "BLK", "TO", "PF", "+/-", "PTS"]
+SUMMARY = {
+    "header": {"competitions": [{"competitors": [{"homeAway": "home", "team": {"id": "150"}}, {"homeAway": "away", "team": {"id": "349"}}]}]},
+    "boxscore": {
+        "teams": [{"team": {"id": "150", "abbreviation": "DUKE"}, "statistics": [
+            {"name": "fieldGoalsMade-fieldGoalsAttempted", "displayValue": "31-70", "label": "FG"},
+            {"name": "offensiveRebounds", "displayValue": "12", "label": "Offensive Rebounds"},
+            {"name": "turnovers", "displayValue": "11", "label": "TO"},
+            {"name": "freeThrowsMade-freeThrowsAttempted", "displayValue": "17-22", "label": "FT"}]}],
+        "players": [{"team": {"id": "150", "abbreviation": "DUKE"}, "statistics": [{"labels": LABELS, "athletes": [
+            {"athlete": {"displayName": "Cooper Flagg"}, "starter": True, "didNotPlay": False,
+             "stats": ["34", "10-18", "3-7", "5-6", "2", "7", "9", "4", "2", "1", "3", "2", "+20", "28"]},
+            {"athlete": {"displayName": "Bench Guy"}, "starter": False, "didNotPlay": True, "stats": []}]}]},
+            {"team": {"id": "349", "abbreviation": "ARMY"}, "statistics": [{"labels": LABELS, "athletes": [
+                {"athlete": {"displayName": "Army Guard"}, "starter": True,
+                 "stats": ["30", "5-12", "2-6", "2-2", "0", "3", "3", "5", "1", "0", "2", "3", "-20", "14"]}]}]}]}}
 
 
 if __name__ == "__main__":

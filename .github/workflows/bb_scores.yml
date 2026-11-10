@@ -34,6 +34,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           save() {
             git add -A scores/bb
+            [ -d box/bb ] && git add -A box/bb
             if git diff --cached --quiet; then return 0; fi
             git commit -q -m "Basketball scores $(date -u +%Y-%m-%dT%H:%MZ)"
             git pull -q --rebase origin "${GITHUB_REF_NAME}" || true
