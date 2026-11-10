@@ -279,6 +279,53 @@ class Ledger(unittest.TestCase):
         self.assertEqual(stars, ["MBB-away2-home2", "MBB-away3-home3", "MBB-away4-home4"])   # the strongest cases
         self.assertTrue(all(g["lean"]["conf"] == 2 for g in gs.values()))
 
+    def test_claude_model_card_built_and_graded(self):
+        tip = "2026-11-11T00:00Z"
+        self.put_feed("2026-11-10", [fgame("7", "NBA", tip, "Lakers", "Hawks", hl=-1.5, tot=236.5, hp=53.5)])
+        cm = os.path.join(self.tmp.name, "bb_cm.json")
+        trae = {"g": 10, "min": 35, "pts": 26.0, "r5_pts": 28.0, "sd_pts": 6.0, "reb": 3.0, "ast": 11.0, "dd": 0.4, "last": "2026-11-08"}
+        wj({"updatedAt": "2026-11-10T12:00Z", "version": "bbcm-1", "leagues": {"NBA": {
+            "params": {"hca": 2.5, "b2b": -1.5}, "lg_eff": 114.0, "lg_pace": 99.0, "sigma_m": 12.5,
+            "gate": {"pass": False, "why": "no reliable gain", "a_fit": 0.0, "b_fit": 0.2, "scale": 4.0, "t": 0.4},
+            "gate_total": {"pass": False, "a_fit": 0.0, "b_fit": 0.1, "scale": 5.0},
+            "backtest": {"seasons": "2025–2026", "games": 2400, "ats": 50.9, "atsN": 2300},
+            "teams": {"27": {"n": "Hawks", "o": 3.0, "d": 1.0, "p": 1.0, "last": "2026-11-09"},  # US Eastern dates
+                      "17": {"n": "Lakers", "o": 1.0, "d": -1.0, "p": 0.5, "last": "2026-11-08"}},
+            "players": {"HAWK": {"Trae Young": trae}, "LAKE": {"LeBron James": {"g": 10, "min": 34, "pts": 24.0, "reb": 8.0, "ast": 8.0}}}}}}, cm)
+        ctx = os.path.join(self.tmp.name, "ctx.json")
+        wj({"NBA-lakers-hawks": {"props": [{"pl": "Trae Young", "tm": "HAWK", "mk": "Points", "ln": 24.5, "side": "O", "src": "Covers", "why": "x"}],
+                                 "out": ["LeBron James"]}}, ctx)
+        self.apply(self.run_ledger("2026-11-10T16:00:00Z", extra=["--ctx", ctx, "--cm", cm]))
+        g = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]
+        c = g["cm"]
+        # Hawks (home): 114+3-(-1)=118 vs Lakers 114+1-1=114 at 100.5 possessions: 4.02 + 2.5 home court
+        # + LeBron out: 0.15*(24+5.6+2.4)*1 = 4.8 off the Lakers' side; the Hawks played yesterday: -1.5
+        self.assertAlmostEqual(c["hm"], round(4.02 + 2.5 - 1.5 + 4.8, 1), places=1)
+        self.assertEqual(c["picks"]["spread"]["side"], "H")
+        self.assertEqual(c["picks"]["spread"]["ln"], -1.5)
+        self.assertEqual(c["props"][0]["side"], "O")                          # 0.6*26 + 0.4*28 = 26.8 > 24.5
+        self.assertIn("LeBron James out", c["why"])
+        self.assertIn("Not validated", c["why"])
+        self.assertEqual(c["conf"], 1)
+        self.assertEqual(self.doc("meta", "bbcmmodel")["gate"]["NBA"]["pass"], False)
+        self.assertEqual(len(self.doc("meta", "bbcmvars")["vars"]), len(B.CM_VARS))
+        rows = self.doc("bbcmvars/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]["rows"]
+        self.assertEqual({r[0] for r in rows}, {v[0] for v in B.CM_VARS})
+        # final: graded from the score and the box score
+        box = os.path.join(self.tmp.name, "box")
+        os.makedirs(box)
+        wj({"games": {"7": {"lg": "NBA", "players": [{"n": "Trae Young", "tm": "HAWK", "pts": 30}]}}}, os.path.join(box, "2026-11-10.json"))
+        self.put_feed("2026-11-10", [fgame("7", "NBA", tip, "Lakers", "Hawks", hl=-1.5, tot=236.5, state="post", sa=100, sh=110)])
+        self.apply(self.run_ledger("2026-11-11T03:00:00Z", slate=None, extra=["--box", box, "--cm", cm]))
+        g = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]
+        self.assertEqual(g["cmgr"]["spread"], "W")                            # Hawks -1.5 won by 10
+        self.assertEqual(g["cmgr"]["ml"], "W")
+        self.assertEqual(g["cmgr"]["props"], ["W"])
+        self.assertEqual(g["cmpv"], [30])
+        row = self.doc("bbcmresults", "2026-11-10")["games"]["NBA-lakers-hawks"]
+        self.assertEqual((row["spread"], row["props"]["W"]), ("W", 1))
+        self.assertEqual(row["mae"], round(abs(10 - g["cm"]["hm"]), 1))
+
     def test_ledger_model_numbers_and_gates(self):
         tip = "2026-11-11T00:00Z"
         self.put_feed("2026-11-10", [fgame("7", "NBA", tip, "Lakers", "Hawks", hl=-1.5, tot=236.5, hp=53.5)])

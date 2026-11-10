@@ -389,8 +389,9 @@ def assign_stars(slate, built, docs, now):
             g.pop("_score", None)
 
 
-def build(slate, feed_day, docs, ctx, now, leagues):
-    """New/updated games per league for the slate date. Returns ({lg: {gid: game or changed fields}}, new game count)."""
+def build(slate, feed_day, docs, ctx, now, leagues, CMd=None, cm_rows=None):
+    """New/updated games per league for the slate date. Returns ({lg: {gid: game or changed fields}}, new game count).
+    With the Claude Model's numbers (CMd) each game also gets its cm card; its checklist rows go to cm_rows[lg][gid]."""
     out, n_new = {}, 0
     full = {}
     by_eid = {}
@@ -426,6 +427,15 @@ def build(slate, feed_day, docs, ctx, now, leagues):
             if g["id"] in ids:
                 g["id"] = f"{g['id']}-{e['id']}"
             n_new += 1
+        if CMd:
+            card, rows = cm_card(g, e, lg, CMd, now)
+            if card:
+                oc = (old or {}).get("cm")
+                if oc and {k: v for k, v in oc.items() if k != "at"} == {k: v for k, v in card.items() if k != "at"}:
+                    card = oc                              # unchanged: keep its build time
+                g["cm"] = card
+                if cm_rows is not None:
+                    cm_rows.setdefault(lg, {})[old["id"] if old else g["id"]] = {"rows": rows}
         full.setdefault(lg, {})[old["id"] if old else g["id"]] = (g, old)
     assign_stars(slate, {lg: {gid: g for gid, (g, _) in gs.items()} for lg, gs in full.items()}, docs, now)
     for lg, gs in full.items():
@@ -552,6 +562,339 @@ def gates_of(M):
     return g if g.get("leagues") else None
 
 
+# ---------- the Claude Model (model/results/bb_cm.json), gated ----------
+CM_VERSION = "bbcm-1"
+# The basketball checklist: [id, domain, name, tier, how it is measured]. Statuses per game: measured, proxy, context
+# (Claude's research), bench (market numbers, used only to compare and grade) and none (no public data; no weight).
+CM_VARS = [
+    ["E1", "Efficiency", "Adjusted offensive rating", "A", "Points per 100 possessions, opponent-adjusted, walk-forward"],
+    ["E2", "Efficiency", "Adjusted defensive rating", "A", "Points allowed per 100 possessions vs an average offense (lower is better)"],
+    ["E3", "Efficiency", "Adjusted net rating", "A", "E1 minus E2"],
+    ["E4", "Efficiency", "Raw offensive rating this season", "B", "Points per 100 possessions from box scores"],
+    ["E5", "Efficiency", "Raw defensive rating this season", "B", "Opponent points per 100 possessions"],
+    ["P1", "Pace", "Adjusted pace", "A", "Possessions per game above or below the league, walk-forward"],
+    ["P2", "Pace", "Raw pace this season", "B", "FGA - OREB + TO + 0.44 FTA per game"],
+    ["P3", "Pace", "Projected possessions in this game", "A", "League pace plus both teams' pace ratings"],
+    ["F1", "Four factors: offense", "Effective field-goal %", "B", "(FGM + 0.5 x 3PM) / FGA"],
+    ["F2", "Four factors: offense", "Turnover rate", "B", "Turnovers per 100 possessions"],
+    ["F3", "Four factors: offense", "Offensive rebound rate", "B", "OREB / (OREB + opponent DREB)"],
+    ["F4", "Four factors: offense", "Free-throw rate", "B", "FTA / FGA"],
+    ["G1", "Four factors: defense", "Opponent effective FG %", "B", "Allowed"],
+    ["G2", "Four factors: defense", "Forced turnover rate", "B", "Opponent turnovers per 100 possessions"],
+    ["G3", "Four factors: defense", "Opponent offensive rebound rate", "B", "Allowed"],
+    ["G4", "Four factors: defense", "Opponent free-throw rate", "B", "Allowed"],
+    ["S1", "Schedule", "Days since the last game", "B", "From the schedule"],
+    ["S2", "Schedule", "Second night of a back-to-back", "A", "Fitted effect in points on tuning seasons"],
+    ["S3", "Schedule", "Home court", "A", "Fitted in points on tuning seasons (0 at a neutral site)"],
+    ["S4", "Schedule", "Games played this season", "C", "Sample size behind the ratings"],
+    ["I1", "Players", "Players ruled out", "A", "From the injury news Claude read (named with its source on the board)"],
+    ["I2", "Players", "Points lost to absences", "A", "0.15 x (points + 0.7 assists + 0.3 rebounds) per absent player, scaled by minutes"],
+    ["I3", "Players", "Top scorer's points per game", "C", "This season's box scores"],
+    ["I4", "Players", "Rotation size (15+ minutes a game)", "C", "This season's box scores"],
+    ["M1", "Projection", "Projected points", "A", "Efficiency x projected possessions / 100"],
+    ["M2", "Projection", "Projected margin", "A", "Home minus away, with home court, rest and absences"],
+    ["M3", "Projection", "Win chance", "A", "Normal curve on the margin with the backtest's spread of outcomes"],
+    ["B1", "Market (compare and grade only)", "Spread", "-", "DraftKings via ESPN"],
+    ["B2", "Market (compare and grade only)", "Total", "-", "DraftKings via ESPN"],
+    ["N1", "No public data", "Travel distance and time zones", "-", "Not in the free data"],
+    ["N2", "No public data", "Referee crew tendencies", "-", "Not in the free data"],
+    ["N3", "No public data", "Lineup net ratings", "-", "Not in the free data"],
+    ["N4", "No public data", "Shot quality and tracking data", "-", "Not in the free data"],
+    ["N5", "No public data", "Minutes restrictions and player load", "-", "Not in the free data"],
+    ["N6", "No public data", "Motivation, lookahead and rivalry", "-", "Not measurable"],
+]
+
+
+def phi(z):
+    return 0.5 * (1 + math.erf(z / math.sqrt(2)))
+
+
+def fair_am(p):
+    if not p or p <= 0 or p >= 1:
+        return None
+    return f"{'-' if p >= 0.5 else '+'}{round(100 * p / (1 - p)) if p >= 0.5 else round(100 * (1 - p) / p)}"
+
+
+def cm_league(CMd, lg):
+    L = ((CMd or {}).get("leagues") or {}).get(lg) or {}
+    return None if "error" in L or not L.get("teams") else L
+
+
+def cm_player(L, tm, name):
+    roster = ((L.get("players") or {}).get(tm) or {})
+    cands = [dict(v, n=k) for k, v in roster.items()]
+    return A.find_player(name, cands) if cands else None
+
+
+def prop_proj(L, team_ids, abbrs, prop, pf):
+    """Model projection for one prop: {mu, sd, p (chance of the prop's own side among non-pushes), side (the model's
+    side), pm (chance of the model's side)} or None."""
+    kind = bb_market(prop.get("mk"))
+    if kind is None:
+        return None
+    tms = [prop.get("tm")] if prop.get("tm") else []
+    tms += [t for t in abbrs if t not in tms]
+    pl = None
+    for t in tms:
+        pl = cm_player(L, t, prop.get("pl"))
+        if pl:
+            tm = t
+            break
+    if not pl or (pl.get("g") or 0) < 3:
+        return None
+    f = pf.get(tm, 1.0)
+    if kind == "dd" or kind == "td":
+        if kind == "td":
+            return None
+        rate = (pl.get("dd", 0) * pl["g"] + 0.1) / (pl["g"] + 1)
+        return {"mu": round(rate, 3), "p": round(rate, 4) if prop.get("side") == "Y" else None, "side": "Y", "pm": round(rate, 4)}
+    comps = ("fp",) if kind == "fp" else kind
+    mu = sum(0.6 * (pl.get(k) or 0) + 0.4 * (pl.get("r5_" + k) or pl.get(k) or 0) for k in comps) * f
+    sd = math.sqrt(sum(max(pl.get("sd_" + k) or 0, 0.3 * (pl.get(k) or 0) + 0.8) ** 2 for k in comps))
+    ln, side = prop.get("ln"), prop.get("side")
+    if ln is None:
+        return {"mu": round(mu, 2), "sd": round(sd, 2), "p": None}
+    if float(ln).is_integer():
+        over, under = 1 - phi((ln + 0.5 - mu) / sd), phi((ln - 0.5 - mu) / sd)
+    else:
+        over = 1 - phi((ln - mu) / sd)
+        under = 1 - over
+    po = over / (over + under) if over + under > 0 else 0.5
+    ms = "O" if po >= 0.5 else "U"
+    return {"mu": round(mu, 2), "sd": round(sd, 2), "p": round(po if side == "O" else 1 - po, 4) if side in ("O", "U") else None,
+            "side": ms, "pm": round(max(po, 1 - po), 4)}
+
+
+def cm_card(g, e, lg, CMd, now):
+    """Claude's own card for a game (the football cm schema), or None when either team has no rating."""
+    L = cm_league(CMd, lg)
+    if not L or not e:
+        return None, None
+    T = L["teams"]
+    hid, aid = str(e["home"].get("id")), str(e["away"].get("id"))
+    h, a = T.get(hid), T.get(aid)
+    if not h or not a:
+        return None, None
+    P = L.get("params") or {}
+    eff, pace0 = L.get("lg_eff", 100.0), L.get("lg_pace", 70.0)
+    neutral = bool(e.get("neutral"))
+    hca = 0.0 if neutral else P.get("hca", 0.0)
+    pc = pace0 + h.get("p", 0) + a.get("p", 0)
+    day = et_day(A.when(e["date"])).isoformat() if e.get("date") else ""
+
+    def rest(t):
+        try:
+            return (dt.date.fromisoformat(day) - dt.date.fromisoformat(t["last"])).days if t.get("last") else None
+        except ValueError:
+            return None
+    rh, ra = rest(h), rest(a)
+    b2b = P.get("b2b", 0.0) * ((1 if rh == 1 else 0) - (1 if ra == 1 else 0))
+    oh, oa = eff + h.get("o", 0) - a.get("d", 0), eff + a.get("o", 0) - h.get("d", 0)
+    # absences from Claude's injury research: a share of each absent player's production, scaled by his minutes
+    abbr = {"H": e["home"].get("abbr"), "A": e["away"].get("abbr")}
+    lost = {"H": 0.0, "A": 0.0}
+    outs = {"H": [], "A": []}
+    for name in g.get("out") or []:
+        for s in ("H", "A"):
+            pl = cm_player(L, abbr[s], name)
+            if pl:
+                lost[s] += 0.15 * ((pl.get("pts") or 0) + 0.7 * (pl.get("ast") or 0) + 0.3 * (pl.get("reb") or 0)) * min(1.0, (pl.get("min") or 0) / 30)
+                outs[s].append(pl["n"])
+                break
+    base_m = (oh - oa) * pc / 100
+    m = base_m + hca + b2b - lost["H"] + lost["A"]
+    t = (oh + oa) * pc / 100 - 0.5 * (lost["H"] + lost["A"])
+    sig_m = L.get("sigma_m") or 12.0
+    wp = 100 * phi(m / sig_m)
+    sc = {"a": int(round((t - m) / 2)), "h": int(round((t + m) / 2))}
+    if sc["a"] == sc["h"]:
+        sc["h" if m >= 0 else "a"] += 1
+    line = g.get("line") or {}
+    fav_l, sp, tot = line.get("fav"), line.get("sp"), line.get("tot")
+    names = {"A": g["a"]["n"], "H": g["h"]["n"]}
+    picks = {}
+    gate, gt = L.get("gate") or {}, L.get("gate_total") or {}
+
+    def cover(edge, G):
+        b, a_, sc_ = G.get("b_fit"), G.get("a_fit", 0.0), G.get("scale") or 1.0
+        if b is None or b <= 0:
+            return 0.5
+        return 1 / (1 + math.exp(-(a_ + b * edge / sc_)))
+    if sp is not None and fav_l in ("A", "H"):
+        line_hm = sp if fav_l == "H" else -sp
+        edge = m - line_hm
+        side = "H" if edge > 0 else "A"
+        ph = cover(edge, gate)
+        picks["spread"] = {"side": side, "ln": 0.0 if sp == 0 else (-sp if side == fav_l else sp),
+                           "p": round(100 * (ph if side == "H" else 1 - ph), 1), "edge": round(abs(edge), 1)}
+        mk_p = 100 * phi(line_hm / sig_m)
+    else:
+        mk_p = None
+    ml_side = "H" if wp >= 50 else "A"
+    p_ml = wp if ml_side == "H" else 100 - wp
+    picks["ml"] = {"side": ml_side, "p": round(p_ml, 1), "fair": fair_am(p_ml / 100)}
+    if mk_p is not None:
+        picks["ml"]["mkt"] = round(mk_p if ml_side == "H" else 100 - mk_p, 1)
+        picks["ml"]["value"] = p_ml - picks["ml"]["mkt"] >= 3
+    if tot is not None:
+        edge = t - tot
+        po = cover(edge, gt)
+        side = "O" if edge > 0 else "U"
+        picks["total"] = {"side": side, "ln": float(tot), "p": round(100 * (po if side == "O" else 1 - po), 1), "edge": round(edge, 1)}
+    # props: Claude's side and chance for every prop on the board (same order), plus projections without a line
+    pf = {}
+    for s, t_ in (("H", h), ("A", a)):
+        tp = pace0 + t_.get("p", 0)
+        pf[abbr[s]] = max(0.9, min(1.1, pc / tp)) if tp > 0 else 1.0
+    cprops = []
+    for p in g.get("props") or []:
+        x = prop_proj(L, [hid, aid], [abbr["H"], abbr["A"]], p, pf)
+        if not x or x.get("pm") is None or (p.get("side") == "Y" and x.get("side") != "Y"):
+            cprops.append(None)
+            continue
+        side = "Y" if p.get("side") == "Y" else x["side"]
+        cprops.append({"pl": p["pl"], "tm": p.get("tm"), "mk": p["mk"], "ln": p.get("ln"), "side": side,
+                       "proj": round(x["mu"] * (100 if side == "Y" else 1), 1) if side == "Y" else round(x["mu"], 1),
+                       "p": round(100 * x["pm"], 1), "why": f"Season and last-five average, pace-adjusted ({x['mu']:.1f})" if side != "Y" else "Share of games with a double-double",
+                       "src": "Claude Model from ESPN box scores"})
+    proj = []
+    for s in ("A", "H"):
+        roster = ((L.get("players") or {}).get(abbr[s]) or {})
+        top = sorted(((v.get("min") or 0, k, v) for k, v in roster.items() if (v.get("g") or 0) >= 3 and k not in outs[s]), reverse=True)[:2]
+        for _, k, v in top:
+            mu = (0.6 * (v.get("pts") or 0) + 0.4 * (v.get("r5_pts") or v.get("pts") or 0)) * pf.get(abbr[s], 1.0)
+            sd = max(v.get("sd_pts") or 0, 0.3 * (v.get("pts") or 0) + 0.8)
+            proj.append({"pl": k, "tm": abbr[s], "mk": "Points", "proj": round(mu, 1), "lo": round(max(0, mu - 0.674 * sd), 1), "hi": round(mu + 0.674 * sd, 1)})
+    cand = [(abs(v["p"] - 50), k) for k, v in picks.items() if k in ("spread", "total") and v.get("p") is not None]
+    cand += [(abs(x["p"] - 50), "prop") for x in cprops[:1] if x]
+    best = max(cand)[1] if cand else "ml"
+    if best == "prop":
+        i0 = next(i for i, x in enumerate(cprops) if x)
+        if i0 != 0:
+            best = "spread" if "spread" in picks else "ml"
+    passed = bool(gate.get("pass"))
+    conf = 2 if passed and best == "spread" and picks.get("spread", {}).get("edge", 0) >= (gate.get("thr") or 99) else 1
+    winner = "H" if m >= 0 else "A"
+    why = (f"Claude projects {names[winner]} by {abs(m):.1f} and {t:.0f} points at {pc:.0f} possessions"
+           + (f"; {', '.join(outs['H'] + outs['A'])} out" if outs["H"] or outs["A"] else "") + ".")
+    if not passed:
+        why += " Not validated: its backtest has not beaten the closing line, so this is for comparison only."
+    drivers = [{"k": "Offense vs defense", "e": round(base_m, 1)}, {"k": "Home court" if not neutral else "Neutral site", "e": round(hca, 1)}]
+    if b2b:
+        drivers.append({"k": "Back-to-back", "e": round(b2b, 1)})
+    if lost["H"] or lost["A"]:
+        drivers.append({"k": "Absences", "e": round(lost["A"] - lost["H"], 1)})
+    ff = lambda t_, side, k: ((t_.get("ff") or {}).get(side) or {}).get(k)
+    rows = []
+
+    def row(i, va, vh, status, edge=None, note=None):
+        rows.append([i, va, vh, edge, status, note] if note else [i, va, vh, edge, status])
+    sg = lambda v: None if v is None else (f"{names['H' if v > 0 else 'A']} +{abs(v):.1f}" if v else "even")
+    row("E1", round(eff + a.get("o", 0), 1), round(eff + h.get("o", 0), 1), "measured")
+    row("E2", round(eff - a.get("d", 0), 1), round(eff - h.get("d", 0), 1), "measured")
+    row("E3", round(a.get("o", 0) + a.get("d", 0), 1), round(h.get("o", 0) + h.get("d", 0), 1), "measured", sg(round(base_m, 1)))
+    row("E4", ff(a, "off", "rtg"), ff(h, "off", "rtg"), "measured" if ff(h, "off", "rtg") else "none")
+    row("E5", ff(a, "def", "rtg"), ff(h, "def", "rtg"), "measured" if ff(h, "def", "rtg") else "none")
+    row("P1", round(a.get("p", 0), 1), round(h.get("p", 0), 1), "measured")
+    row("P2", (a.get("ff") or {}).get("pace"), (h.get("ff") or {}).get("pace"), "measured" if (h.get("ff") or {}).get("pace") else "none")
+    row("P3", round(pc, 1), round(pc, 1), "measured")
+    for vid, side, k in (("F1", "off", "efg"), ("F2", "off", "tov"), ("F3", "off", "orb"), ("F4", "off", "ftr"),
+                         ("G1", "def", "efg"), ("G2", "def", "tov"), ("G3", "def", "orb"), ("G4", "def", "ftr")):
+        va, vh = ff(a, side, k), ff(h, side, k)
+        row(vid, va, vh, "measured" if va is not None and vh is not None else "none")
+    row("S1", ra, rh, "measured" if ra is not None or rh is not None else "none")
+    row("S2", ra == 1, rh == 1, "measured", sg(round(b2b, 1)) if b2b else None)
+    row("S3", 0.0, round(hca, 1), "measured", sg(round(hca, 1)) if hca else None)
+    row("S4", (a.get("ff") or {}).get("g"), (h.get("ff") or {}).get("g"), "measured")
+    row("I1", ", ".join(outs["A"]) or "none found", ", ".join(outs["H"]) or "none found", "context" if g.get("out") else "none")
+    row("I2", round(lost["A"], 1), round(lost["H"], 1), "proxy" if g.get("out") else "none", sg(round(lost["A"] - lost["H"], 1)) if lost["A"] or lost["H"] else None)
+    for s, t_ in (("A", a), ("H", h)):
+        pass
+    roster = lambda s: ((L.get("players") or {}).get(abbr[s]) or {})
+    topsc = lambda s: max([v.get("pts") or 0 for v in roster(s).values() if (v.get("g") or 0) >= 3] or [None]) if roster(s) else None
+    rot = lambda s: sum(1 for v in roster(s).values() if (v.get("min") or 0) >= 15 and (v.get("g") or 0) >= 3) if roster(s) else None
+    row("I3", topsc("A"), topsc("H"), "measured" if roster("H") and roster("A") else "none")
+    row("I4", rot("A"), rot("H"), "measured" if roster("H") and roster("A") else "none")
+    row("M1", sc["a"], sc["h"], "measured")
+    row("M2", round(-m, 1), round(m, 1), "measured", sg(round(m, 1)))
+    row("M3", round(100 - wp, 1), round(wp, 1), "measured")
+    row("B1", None, (f"{names[fav_l]} -{sp:g}" if sp else "pick'em") if sp is not None and fav_l in ("A", "H") else None, "bench")
+    row("B2", None, tot, "bench")
+    for vid in ("N1", "N2", "N3", "N4", "N5", "N6"):
+        row(vid, None, None, "none")
+    cov = {"total": len(CM_VARS)}
+    for r in rows:
+        cov[r[4]] = cov.get(r[4], 0) + 1
+    card = {"v": CM_VERSION, "at": now.astimezone(UTC).isoformat(timespec="seconds"), "tracked": True, "sc": sc,
+            "hm": round(m, 1), "wp": round(wp, 1), "tot": round(t, 1),
+            "fair": {"fav": "H" if m >= 0 else "A", "sp": round(abs(m) * 2) / 2, "tot": round(t * 2) / 2,
+                     "mlA": fair_am(1 - wp / 100), "mlH": fair_am(wp / 100)},
+            "mkt": {"fav": fav_l, "sp": sp, "tot": tot}, "picks": picks, "best": best, "conf": conf, "why": why,
+            "drivers": drivers, "props": cprops, "proj": proj, "cov": cov}
+    return card, rows
+
+
+def cm_grade(g, cm, sc, pv, players):
+    """Grade a Claude Model card from the final score. Returns (cmgr, cmpv, cmpa, results row)."""
+    pk = cm.get("picks") or {}
+    side_sc = {"A": sc["a"], "H": sc["h"]}
+    other = {"A": "H", "H": "A"}
+    gr = {}
+    s = pk.get("spread")
+    if s and s.get("side") in side_sc and s.get("ln") is not None:
+        gr["spread"] = A.grade_game({"lg": g["lg"], "line": cm.get("mkt") or {}, "lean": {"mk": "spread", "side": s["side"], "ln": s["ln"]}}, sc["a"], sc["h"])[1]
+    t = pk.get("total")
+    if t and t.get("ln") is not None:
+        gr["total"] = A.wl((sc["a"] + sc["h"] - t["ln"]) * (1 if t["side"] == "O" else -1))
+    ml = pk.get("ml")
+    if ml and ml.get("side") in side_sc:
+        gr["ml"] = A.wl(side_sc[ml["side"]] - side_sc[other[ml["side"]]])
+    if isinstance(cm.get("hm"), (int, float)) and cm["hm"]:
+        gr["su"] = A.wl((sc["h"] - sc["a"]) * (1 if cm["hm"] > 0 else -1))
+    props = cm.get("props") or []
+    cmpv, pgr = [], []
+    for i, p in enumerate(props):
+        v = pv[i] if i < len(pv) else None
+        cmpv.append(v)
+        pgr.append(A.grade_ou(v, p.get("ln"), p.get("side")) if p and v is not None else None)
+    gr["props"] = pgr
+    best = cm.get("best")
+    gr["best"] = gr.get(best) if best in ("spread", "total", "ml") else (pgr[0] if best == "prop" and pgr else None)
+    cmpa = []
+    for q in cm.get("proj") or []:
+        pl = A.find_player(q.get("pl"), players) if players else None
+        cmpa.append(bb_stat(q.get("mk"), pl) if pl else None)
+    cnt = {"W": 0, "L": 0, "P": 0}
+    for r in pgr:
+        if r in cnt:
+            cnt[r] += 1
+    row = {"lg": g["lg"], "best": gr.get("best"), "spread": gr.get("spread"), "ml": gr.get("ml"), "total": gr.get("total"),
+           "su": gr.get("su"), "props": cnt}
+    if isinstance(cm.get("hm"), (int, float)):
+        row["mae"] = round(abs((sc["h"] - sc["a"]) - cm["hm"]), 1)
+    if isinstance(cm.get("tot"), (int, float)):
+        row["tae"] = round(abs((sc["h"] + sc["a"]) - cm["tot"]), 1)
+    return gr, cmpv, cmpa, row
+
+
+def cm_model_doc(CMd):
+    """meta/bbcmmodel for the page: each league's gate and out-of-sample backtest."""
+    if not CMd:
+        return None
+    gate, bt, notes = {}, {}, []
+    for lg, L in (CMd.get("leagues") or {}).items():
+        if "error" in L:
+            notes.append(f"{lg}: not run ({L['error'][:120]})")
+            continue
+        G, b = L.get("gate") or {}, L.get("backtest") or {}
+        gate[lg] = {"pass": bool(G.get("pass")), "why": G.get("why"), "ats": b.get("ats"), "n": b.get("atsN"), "t": G.get("t"), "thr": G.get("thr")}
+        bt[lg] = b
+        if L.get("stale"):
+            notes.append(f"{lg}: the last run failed, so the previous numbers are shown")
+    notes.append("Gated: until a league's spread gate passes, its picks are for comparison only and move no chance.")
+    return {"version": CMd.get("version"), "updatedAt": CMd.get("updatedAt"), "gate": gate, "backtest": bt, "notes": notes}
+
+
 def match_bb(g, pool):
     """Like the football matcher, restricted to the game's own league (men's and women's teams share names)."""
     return A.match(dict(g, lg="_" + g["lg"]), [e for e in pool if e.get("lg") == g["lg"]])
@@ -562,8 +905,8 @@ def grade_docs(docs_by_slate, pre_old, feed, now, now_iso, pool_cache, opts=None
     results {slate: {gid: row}}, counters). opts: box (URL|dir of box/bb), M (Ledger Model results)."""
     opts = opts or {}
     M, box_src = opts.get("M"), opts.get("box")
-    changes, pregame, results = {}, {}, {}
-    n = {"upd": 0, "graded": 0, "lock": 0, "ver": 0, "late": 0, "unmatched": [], "void": 0, "gaps": 0}
+    changes, pregame, results, cmres = {}, {}, {}, {}
+    n = {"upd": 0, "graded": 0, "lock": 0, "ver": 0, "late": 0, "unmatched": [], "void": 0, "gaps": 0, "cm": 0}
     box_cache = {}
 
     def box(d):
@@ -717,7 +1060,7 @@ def grade_docs(docs_by_slate, pre_old, feed, now, now_iso, pool_cache, opts=None
                     pgr = list(gr.get("props") or [None] * len(props))
                     pgr += [None] * (len(props) - len(pgr))
                     players = None
-                    if props:
+                    if props or (g.get("cm") or {}).get("proj"):
                         bx = box(et_day(ko)).get(e["id"]) or box(et_day(A.when(e["date"]))).get(e["id"])
                         players = (bx or {}).get("players")
                     for i, p in enumerate(props):
@@ -773,11 +1116,19 @@ def grade_docs(docs_by_slate, pre_old, feed, now, now_iso, pool_cache, opts=None
                                 if rows:
                                     row["pp"] = rows
                             results.setdefault(slate, {})[gid] = row
+                    cm = g.get("cm")
+                    if cm and cm.get("tracked") is not False:
+                        cgr, cpv, cpa, crow = cm_grade(g, cm, sc, pv, players)
+                        if cgr != g.get("cmgr") or cpv != (g.get("cmpv") or []) or cpa != (g.get("cmpa") or []):
+                            if not g.get("cmgr"):
+                                n["cm"] += 1
+                            ch.update({"cmgr": cgr, "cmpv": cpv, "cmpa": cpa})
+                            cmres.setdefault(slate, {})[gid] = crow
                 elif g.get("clk") != e.get("detail"):
                     ch["clk"] = e.get("detail")
                 if ch:
                     changes.setdefault((slate, lg), {})[gid] = ch
-    return changes, pregame, results, n
+    return changes, pregame, results, n, cmres
 
 
 # ---------- config ----------
@@ -830,6 +1181,8 @@ def read_docs(docs_dir):
         pre[os.path.basename(path)[:-5]] = d.get("data", d) if "games" not in d and isinstance(d.get("data"), dict) else d
     for path in glob.glob(os.path.join(docs_dir, "bbresults", "*.json")):
         res[os.path.basename(path)[:-5]] = True
+    for path in glob.glob(os.path.join(docs_dir, "bbcmresults", "*.json")):
+        res["cm:" + os.path.basename(path)[:-5]] = True
     cfg_path = os.path.join(docs_dir, "meta", "bbconfig.json")
     cfg = A.load(cfg_path) if os.path.exists(cfg_path) else None
     if cfg and "slates" not in cfg and isinstance(cfg.get("data"), dict):
@@ -898,11 +1251,11 @@ def main(argv=None):
     existed = {(s, lg) for s, v in lg_docs.items() for lg in v}
     manifest, notes = [], []
 
-    built = {}
+    built, cm_rows = {}, {}
     if args.slate and not args.grade_only:
         day = load_day(args.feed, dt.date.fromisoformat(args.slate))
         ctx = A.load(args.ctx) if args.ctx and os.path.exists(args.ctx) else {}
-        built, n_new = build(dt.date.fromisoformat(args.slate), day, lg_docs.get(args.slate) or {}, ctx or {}, now, leagues)
+        built, n_new = build(dt.date.fromisoformat(args.slate), day, lg_docs.get(args.slate) or {}, ctx or {}, now, leagues, CM, cm_rows)
         for lg, games in built.items():
             doc = lg_docs.setdefault(args.slate, {}).setdefault(lg, {"slate": args.slate, "league": lg, "games": {}})
             for gid, ch in games.items():
@@ -915,7 +1268,7 @@ def main(argv=None):
             f = write(args.out, "bbconfig.json", cfg2)
             manifest.append({"op": "set", "collection": "meta", "doc_id": "bbconfig", "file_path": f})
 
-    changes, pregame, results, n = grade_docs(lg_docs, pre_old, args.feed, now, now_iso, {}, {"box": box_src, "M": M})
+    changes, pregame, results, n, cmres = grade_docs(lg_docs, pre_old, args.feed, now, now_iso, {}, {"box": box_src, "M": M})
 
     # league docs: one write each, build and grading merged
     keys = set(changes) | {(args.slate, lg) for lg in built}
@@ -973,12 +1326,38 @@ def main(argv=None):
         f = write(args.out, f"{slate}__results.json", body)
         manifest.append({"op": "update" if slate in res_exist else "set", "collection": "bbresults", "doc_id": slate, "file_path": f})
 
+    for slate, rows in sorted(cmres.items()):
+        body = {"slate": slate, "label": slate_label(dt.date.fromisoformat(slate)), "updatedAt": now_iso, "games": rows}
+        f = write(args.out, f"{slate}__cmresults.json", body)
+        manifest.append({"op": "update" if "cm:" + slate in res_exist else "set", "collection": "bbcmresults", "doc_id": slate, "file_path": f})
+
+    # the Claude Model's checklist rows (one doc per league and day), its model card and the checklist itself
+    for lg, rows in sorted(cm_rows.items()):
+        p = os.path.join(args.docs, "bbcmvars", args.slate, "leagues", f"{lg}.json")
+        old = A.load(p) if os.path.exists(p) else None
+        old = (old or {}).get("data", old) if old and "games" not in old else old
+        games = dict((old or {}).get("games") or {})
+        games.update(rows)
+        if games != (old or {}).get("games"):
+            f = write(args.out, f"{args.slate}__cmvars_{lg}.json", {"slate": args.slate, "league": lg, "updatedAt": now_iso, "games": games})
+            manifest.append({"op": "set", "collection": f"bbcmvars/{args.slate}/leagues", "doc_id": lg, "file_path": f})
+    if CM:
+        for name, body in (("bbcmmodel", cm_model_doc(CM)), ("bbcmvars", {"version": CM_VERSION, "vars": CM_VARS})):
+            p = os.path.join(args.docs, "meta", f"{name}.json")
+            old = A.load(p) if os.path.exists(p) else None
+            old = (old or {}).get("data", old) if old and "version" not in old else old
+            if body and body != old:
+                f = write(args.out, f"{name}.json", body)
+                manifest.append({"op": "set", "collection": "meta", "doc_id": name, "file_path": f})
+
     bits = notes + [f"{n['upd']} game{'s' if n['upd'] != 1 else ''} updated", f"{n['graded']} graded"]
     if n["lock"]:
         bits.append(f"{n['lock']} pick{'s' if n['lock'] != 1 else ''} locked, {n['ver']} from a copy saved before tip"
                     + (f" ({n['late']} back-filled)" if n["late"] else ""))
     if n["unmatched"]:
         bits.append(f"{len(n['unmatched'])} not found in the feed")
+    if n["cm"]:
+        bits.append(f"{n['cm']} Claude Model card{'s' if n['cm'] != 1 else ''} graded")
     if n["gaps"]:
         bits.append(f"{n['gaps']} prop{'s' if n['gaps'] != 1 else ''} waiting on box scores")
     if n["void"]:
