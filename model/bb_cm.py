@@ -25,13 +25,18 @@ import argparse
 import glob
 import itertools
 import json
-import math
 import os
 import statistics as st
 import sys
 import time
 from collections import defaultdict
 from zoneinfo import ZoneInfo
+
+
+def _rj(path):
+    with open(path) as f:
+        return json.load(f)
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -46,6 +51,7 @@ LG_EFF = {"NBA": 114.0, "WNBA": 103.0, "MBB": 104.0, "WBB": 95.0}
 LG_PACE = {"NBA": 99.0, "WNBA": 80.0, "MBB": 68.0, "WBB": 70.0}
 GRID = dict(k=[0.04, 0.07, 0.1], kp=[0.03, 0.06], regress=[0.5, 0.7], hca=[2.0, 3.0, 4.0])
 PROP_STATS = ["min", "pts", "reb", "ast", "stl", "blk", "to", "tpm", "fgm", "ftm", "oreb", "dreb", "fp"]
+PROP_MAIN = ["pts", "reb", "ast", "stl", "blk", "to", "tpm", "fp"]     # markets books post: these keep their spread and last five
 
 
 # ---------------------------------------------------------------- data
@@ -53,7 +59,7 @@ def load_games(lg, data):
     """bb_model's game dicts plus each side's box totals (None when ESPN gave none)."""
     rows = []
     for s in BM.seasons_on_disk(lg, data):
-        d = json.load(open(os.path.join(data, f"{lg}_{s}.json")))
+        d = _rj((os.path.join(data, f"{lg}_{s}.json")))
         cols = d.get("cols") or BM.COLS
         for r in d.get("games") or []:
             rows.append((s, dict(zip(cols, r))))
@@ -281,7 +287,7 @@ def players(lg, box_dir, season_start):
         if day < season_start:
             continue
         try:
-            d = json.load(open(path))
+            d = _rj((path))
         except ValueError:
             continue
         for gid, gm in (d.get("games") or {}).items():
@@ -305,7 +311,8 @@ def players(lg, box_dir, season_start):
         row["dd"] = round(sum(1 for p in ps if sum(1 for k in ("pts", "reb", "ast", "stl", "blk") if (p.get(k) or 0) >= 10) >= 2) / len(ps), 3)
         if row["min"] < 8:
             continue                                     # deep bench: no props are posted for them
-        out[tm][n] = {k: v for k, v in row.items() if v is not None}
+        keep = {"g", "last", "dd"} | set(PROP_STATS) | {f"{x}_{k}" for x in ("sd", "r5") for k in PROP_MAIN}
+        out[tm][n] = {k: (round(v, 1) if isinstance(v, float) and k != "dd" else v) for k, v in row.items() if v is not None and k in keep}
     return out
 
 
@@ -343,7 +350,7 @@ def league(lg, G, box_dir):
     return {
         "version": VERSION, "params": p, "poss_factor": round(f, 4), "lg_eff": LG_EFF[lg], "lg_pace": LG_PACE[lg],
         "sigma_m": round(sig_m, 2), "sigma_t": round(sig_t, 2), "tune": list(s["tune"]), "test": list(s["test"]),
-        "games": len(G), "with_stats": has_stats, "asof": max((g["date"] for g in G), default=None),
+        "games": len(G), "with_stats": has_stats, "lined": sum(1 for g in G if g["close"] is not None), "asof": max((g["date"] for g in G), default=None),
         "gate": {k: v for k, v in sp.items() if k in keep}, "gate_total": {k: v for k, v in tt.items() if k in keep},
         "gate_ml": {k: v for k, v in ml.items() if k in ("pass", "why", "w", "w_fit", "sigma", "n_test", "gain", "t")},
         "backtest": backtest(out, s["test"]), "teams": teams,
@@ -363,7 +370,7 @@ def md(res):
               f"Settings `{json.dumps(r['params'])}`; {r['with_stats']} of {r['games']} games had box totals.",
               f"- Test seasons {b['seasons']}: {b['ats']}% against the closing spread ({b['atsN']} games), {b['su']}% winners, "
               f"{b['ou']}% on totals ({b['ouN']}); margin miss {b['mae']} vs the close's {b['mae_mkt']}",
-              f"- Gate: **{'PASS' if g.get('pass') else 'FAIL'}** ({g.get('why')})",
+              f"- Gate: **{'PASS' if g.get('pass') else 'FAIL'}** ({g.get('why')}); games with a closing line: {r.get('lined', 0)}",
               f"- {len(r['teams'])} teams rated this season; players with box scores: {sum(len(v) for v in r['players'].values())}", ""]
     return "\n".join(L) + "\n"
 
@@ -379,8 +386,6 @@ def main(argv=None):
     for lg in [x for x in a.leagues.split(",") if x in BM.SETTINGS]:
         try:
             G = load_games(lg, a.data)
-            if len([g for g in G if g["close"] is not None]) < 400:
-                raise RuntimeError("not enough games with a closing line on disk")
             res["leagues"][lg] = league(lg, G, a.box)
             print(f"{lg}: {len(G)} games in {res['leagues'][lg]['seconds']}s", file=sys.stderr)
         except Exception as e:
@@ -390,7 +395,7 @@ def main(argv=None):
     path = os.path.join(a.out, "bb_cm.json")
     if os.path.exists(path):
         try:
-            old = json.load(open(path))
+            old = _rj((path))
             for k, v in res["leagues"].items():
                 if "error" in v and "error" not in (old.get("leagues", {}).get(k) or {"error": 1}):
                     res["leagues"][k] = dict(old["leagues"][k], stale=v["error"])
