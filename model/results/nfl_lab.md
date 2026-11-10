@@ -1,6 +1,6 @@
 # NFL model lab (lab-1)
 
-Updated 2026-11-04T22:09Z. Development seasons 2012–2017 chose every setting; test seasons 2018–2025 were scored once, each refit on all seasons before it. Live = 2026 to date.
+Updated 2026-11-10T00:07Z. Development seasons 2012–2017 chose every setting; test seasons 2018–2025 were scored once, each refit on all seasons before it. Live = 2026 to date.
 
 Settings chosen on development seasons: `{"snapshots": {"lam": 0.93, "rho": 0.65}, "ridge_alpha": 10.0, "kalman": {"q": 0.25, "q_season": 15, "regress": 0.65, "cap": 21, "hfa_q": 0.001}, "gbm": {"depth": 2, "lr": 0.03, "iters": 300, "leaf": 100}}`
 
@@ -38,16 +38,16 @@ Settings chosen on development seasons: `{"snapshots": {"lam": 0.93, "rho": 0.65
 
 | Model | Games | SU acc | SU Brier | SU log loss | SU gain vs close (t) | Margin MAE | Total MAE | Spread gain vs close (t) | ATS 2+ | Totals gain vs close (t) | SU calib slope |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| Closing market | 120 | 0.650 | 0.2270 | 0.6479 | — | 9.57 | 10.66 | — | — | — | 0.92 |
-| Ledger Model v1 | 120 | 0.608 | 0.2299 | 0.6506 | -0.0027 (-0.15) | 9.95 | 11.12 | -0.0249 (-1.32) | 24–29 | -0.0387 (-2.28) | 1.03 |
-| B · Dynamic ratings (Kalman) | 120 | 0.575 | 0.2344 | 0.6585 | -0.0106 (-0.56) | 10.10 | 11.16 | -0.0362 (-1.90) | 25–35 | -0.0450 (-2.74) | 0.90 |
-| Point-differential baseline | 120 | 0.583 | 0.2363 | 0.6634 | -0.0154 (-0.77) | 9.98 | — | -0.0261 (-1.29) | 29–33 | — | 0.95 |
-| Home-field-only baseline | 120 | 0.517 | 0.2500 | 0.6931 | -0.0452 (-1.48) | 10.25 | — | -0.0027 (-0.09) | 44–34 | — | 11.14 |
-| A · Opponent-adjusted efficiency | 120 | 0.592 | 0.2280 | 0.6465 | 0.0014 (0.08) | 10.03 | 11.19 | -0.0252 (-1.32) | 25–33 | -0.0414 (-2.57) | 0.98 |
-| C · Efficiency + quarterback | 120 | 0.625 | 0.2222 | 0.6359 | 0.0121 (0.71) | 9.93 | 11.29 | -0.0162 (-0.89) | 23–27 | -0.0418 (-2.94) | 1.09 |
-| D · Gradient-boosted matchup | 120 | 0.617 | 0.2233 | 0.6357 | 0.0122 (0.70) | 9.94 | 11.31 | -0.0195 (-1.10) | 30–31 | -0.0464 (-3.05) | 1.14 |
-| E · Separate team scores | 120 | 0.625 | 0.2214 | 0.6335 | 0.0145 (0.82) | 9.88 | 11.40 | -0.0122 (-0.66) | 29–30 | -0.0504 (-3.38) | 1.12 |
-| F · Ensemble (weights from earlier seasons) | 120 | 0.608 | 0.2240 | 0.6382 | 0.0098 (0.59) | 9.92 | 11.24 | -0.0209 (-1.18) | 20–25 | -0.0408 (-2.88) | 1.06 |
+| Closing market | 134 | 0.679 | 0.2157 | 0.6234 | — | 9.45 | 10.55 | — | — | — | 1.16 |
+| Ledger Model v1 | 134 | 0.627 | 0.2218 | 0.6332 | -0.0098 (-0.60) | 9.91 | 11.19 | -0.0240 (-1.35) | 26–32 | -0.0414 (-2.54) | 1.25 |
+| B · Dynamic ratings (Kalman) | 134 | 0.612 | 0.2250 | 0.6387 | -0.0154 (-0.90) | 9.95 | 11.23 | -0.0339 (-1.95) | 28–36 | -0.0454 (-2.88) | 1.14 |
+| Point-differential baseline | 134 | 0.619 | 0.2264 | 0.6428 | -0.0194 (-1.08) | 9.83 | — | -0.0242 (-1.32) | 31–34 | — | 1.24 |
+| Home-field-only baseline | 134 | 0.500 | 0.2518 | 0.6967 | -0.0733 (-2.55) | 10.54 | — | -0.0365 (-1.24) | 47–44 | — | 11.80 |
+| A · Opponent-adjusted efficiency | 134 | 0.619 | 0.2191 | 0.6274 | -0.0040 (-0.23) | 9.88 | 11.13 | -0.0202 (-1.15) | 28–35 | -0.0390 (-2.49) | 1.19 |
+| C · Efficiency + quarterback | 134 | 0.649 | 0.2135 | 0.6167 | 0.0067 (0.42) | 9.82 | 11.17 | -0.0158 (-0.93) | 25–29 | -0.0379 (-2.75) | 1.30 |
+| D · Gradient-boosted matchup | 134 | 0.649 | 0.2148 | 0.6178 | 0.0056 (0.35) | 9.80 | 11.20 | -0.0180 (-1.10) | 34–33 | -0.0415 (-2.83) | 1.37 |
+| E · Separate team scores | 134 | 0.649 | 0.2131 | 0.6154 | 0.0080 (0.49) | 9.79 | 11.28 | -0.0151 (-0.87) | 31–32 | -0.0451 (-3.15) | 1.33 |
+| F · Ensemble (weights from earlier seasons) | 134 | 0.634 | 0.2148 | 0.6184 | 0.0050 (0.33) | 9.81 | 11.16 | -0.0199 (-1.23) | 23–27 | -0.0386 (-2.82) | 1.28 |
 
 ## Market + model (fitted on development seasons, scored on test seasons)
 
@@ -101,16 +101,16 @@ Positive = better than Ledger Model v1.
 
 | Model | 2018 | 2019 | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 |
 |---|---|---|---|---|---|---|---|---|---|
-| Ledger Model v1 | -11 | -26 | -42 | -27 | -32 | -25 | -33 | -28 | -3 |
-| B · Dynamic ratings (Kalman) | -14 | -24 | -26 | -33 | -33 | -30 | -30 | -25 | -11 |
-| Point-differential baseline | -7 | -22 | -42 | -44 | -36 | -29 | -41 | -13 | -15 |
-| Home-field-only baseline | -62 | -81 | -112 | -74 | -78 | -58 | -102 | -85 | -45 |
-| A · Opponent-adjusted efficiency | -7 | -21 | -43 | -28 | -33 | -18 | -38 | -21 | 1 |
-| C · Efficiency + quarterback | 5 | -5 | -40 | -8 | -26 | -4 | -32 | -32 | 12 |
-| D · Gradient-boosted matchup | 0 | -17 | -25 | -20 | -27 | -20 | -24 | -32 | 12 |
-| E · Separate team scores | -0 | -6 | -39 | -6 | -28 | -10 | -31 | -32 | 14 |
-| F · Ensemble (weights from earlier seasons) | 1 | -8 | -30 | -12 | -25 | -14 | -27 | -27 | 10 |
-| Games | 265 | 266 | 268 | 284 | 282 | 285 | 285 | 284 | 120 |
+| Ledger Model v1 | -11 | -26 | -42 | -27 | -32 | -25 | -33 | -28 | -10 |
+| B · Dynamic ratings (Kalman) | -14 | -24 | -26 | -33 | -33 | -30 | -30 | -25 | -15 |
+| Point-differential baseline | -7 | -22 | -42 | -44 | -36 | -29 | -41 | -13 | -19 |
+| Home-field-only baseline | -62 | -81 | -112 | -74 | -78 | -58 | -102 | -85 | -73 |
+| A · Opponent-adjusted efficiency | -7 | -21 | -43 | -28 | -33 | -18 | -38 | -21 | -4 |
+| C · Efficiency + quarterback | 5 | -5 | -40 | -8 | -26 | -4 | -32 | -32 | 7 |
+| D · Gradient-boosted matchup | 0 | -17 | -25 | -20 | -27 | -20 | -24 | -32 | 6 |
+| E · Separate team scores | -0 | -6 | -39 | -6 | -28 | -10 | -31 | -32 | 8 |
+| F · Ensemble (weights from earlier seasons) | 1 | -8 | -30 | -12 | -25 | -14 | -27 | -27 | 5 |
+| Games | 265 | 266 | 268 | 284 | 282 | 285 | 285 | 284 | 134 |
 
 ## Market categories (test seasons): gain vs the closing market, straight-up / spread (t)
 
@@ -149,5 +149,5 @@ Chosen on development seasons only (exportable candidate with the lowest develop
 
 It is recorded before every NFL kickoff in the private ledger (append-only, with its version and data cutoff) and never used for a pick, a value verdict or a stake. It would be promoted only after its verified pregame record beats the same-time market prices the ledger saves.
 
-Published numbers: model/results/nfl_shadow.json (32 teams, data through 2026-11-03T00:15:00-05:00); self-check reproduced the lab's predictions for 15 upcoming games (largest difference 0.047 points).
+Published numbers: model/results/nfl_shadow.json (32 teams, data through 2026-11-09T00:20:00-05:00); self-check reproduced the lab's predictions for 13 upcoming games (largest difference 0.048 points).
 
