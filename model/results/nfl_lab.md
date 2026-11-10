@@ -1,6 +1,6 @@
 # NFL model lab (lab-1)
 
-Updated 2026-11-10T00:07Z. Development seasons 2012–2017 chose every setting; test seasons 2018–2025 were scored once, each refit on all seasons before it. Live = 2026 to date.
+Updated 2026-11-10T00:28Z. Development seasons 2012–2017 chose every setting; test seasons 2018–2025 were scored once, each refit on all seasons before it. Live = 2026 to date.
 
 Settings chosen on development seasons: `{"snapshots": {"lam": 0.93, "rho": 0.65}, "ridge_alpha": 10.0, "kalman": {"q": 0.25, "q_season": 15, "regress": 0.65, "cap": 21, "hfa_q": 0.001}, "gbm": {"depth": 2, "lr": 0.03, "iters": 300, "leaf": 100}}`
 
