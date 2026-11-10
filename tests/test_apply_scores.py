@@ -205,6 +205,15 @@ class Grading(unittest.TestCase):
         g = ledger_game("G", "", "", "", line={"sp": 3, "tot": 40})
         self.assertIsNone(AS.grade_game(g, 10, 20)[0])
 
+    def test_favorite_line_signed_or_as_points(self):
+        # the runbook stores a favorite's line signed (-3.5); older picks stored points (3.5): both grade the same
+        for ln in (-3.5, 3.5):
+            g = {"lg": "NFL", "line": {"fav": "H", "sp": 3.5}, "lean": {"mk": "spread", "side": "H", "ln": ln}}
+            self.assertEqual(AS.grade_game(g, 20, 23)[1], "L", ln)    # favorite won by 3, laid 3.5
+            self.assertEqual(AS.grade_game(g, 20, 24)[1], "W", ln)
+            self.assertEqual(AS.clv_of(g, {"hm": 3.5, "book": "DraftKings"}, False)["pts"], 0.0)
+            self.assertEqual(AS.clv_of(g, {"hm": 4.5, "book": "DraftKings"}, False)["pts"], 1.0)   # closed -4.5: got a point
+
 
 class Pregame(unittest.TestCase):
     def test_quotes_and_append_only_history(self):

@@ -230,8 +230,10 @@ def grade_game(g, a, h):
     l = g.get("lean") or {}
     mk, side, ln = l.get("mk"), l.get("side"), l.get("ln")
     if mk == "spread" and side in sc and ln is not None:
+        # ln is the side's line, stored either signed (favorite -3.5) or as points (3.5): its size and whether the side
+        # is the favorite decide the cover, so both ways grade the same
         m = sc[side] - sc[other[side]]
-        lean = wl(m - ln if side == line.get("fav") else m + ln)
+        lean = wl(m - abs(ln) if side == line.get("fav") else m + abs(ln))
     elif mk == "total" and ln is not None:
         lean = wl((a + h - ln) * (1 if side == "O" else -1))
     elif mk == "tt" and ln is not None and l.get("team") in sc:
@@ -267,7 +269,7 @@ def clv_of(g, close, swapped):
     if mk == "spread" and side in ("A", "H") and close.get("hm") is not None:
         hm = -close["hm"] if swapped else close["hm"]          # closing home margin in our orientation
         fav = (g.get("line") or {}).get("fav")
-        s_pick = -ln if side == fav else ln                     # the side's spread when we picked it
+        s_pick = -abs(ln) if side == fav else abs(ln)           # the side's spread when we picked it (ln signed or as points)
         s_close = -hm if side == "H" else hm                    # the side's spread at the close
         return {"pts": round(s_pick - s_close, 1), "close": s_close, "book": close.get("book")}
     if mk == "total" and side in ("O", "U") and close.get("tot") is not None:
@@ -543,7 +545,7 @@ def closing_chance(gl, books, pmfs, swapped_close=None):
 
     if mk == "spread" and side in ("A", "H") and pmfs.get("m"):
         fav = (gl.get("line") or {}).get("fav")
-        s_line = -ln if side == fav else ln                     # the side's own line
+        s_line = -abs(ln) if side == fav else abs(ln)           # the side's own line (ln signed or as points)
         home_line = s_line if side == "H" else -s_line
         ps, lines = [], []
         for q in books.values():
