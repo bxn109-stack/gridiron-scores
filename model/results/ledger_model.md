@@ -1,6 +1,6 @@
 # Ledger Model
 
-Updated 2026-11-10T00:32Z. Walk-forward points ratings; settings tuned on early seasons, scored on later seasons never seen while tuning. Break-even at −110 is 52.4%.
+Updated 2026-11-10T17:06Z. Walk-forward points ratings; settings tuned on early seasons, scored on later seasons never seen while tuning. Break-even at −110 is 52.4%.
 
 ## NFL
 
@@ -9,7 +9,7 @@ Tuned on 2006–2015, tested on 2016–2025. Settings `{"k": 0.06, "kt": 0.04, "
 - Spread gate: **FAIL** (no reliable gain over the closing line (log-loss gain -0.0004, t = -0.44)). Test ATS when the model disagrees by 2+ pts: 684–691
 - Total gate: **FAIL** (no reliable gain over the closing line (log-loss gain -0.0016, t = -2.08)). Test record at 5+ pts: 85–114
 - Moneyline blend gate: **FAIL** (no reliable gain over the no-vig moneyline (log-loss gain -0.0011, t = -1.58))
-- This season so far (live, out of sample): 26–32 at 2+ pts
+- This season so far (live, out of sample): 26–33 at 2+ pts
 - Push tables: 67 spread rows, 55 total rows
 
 ## FBS
