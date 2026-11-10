@@ -49,7 +49,8 @@ BOX = os.path.join(ROOT, "box", "bb")
 STATS = ["fga", "fgm", "fta", "ftm", "tpa", "tpm", "reb", "oreb", "ast", "to", "pts"]
 LG_EFF = {"NBA": 114.0, "WNBA": 103.0, "MBB": 104.0, "WBB": 95.0}
 LG_PACE = {"NBA": 99.0, "WNBA": 80.0, "MBB": 68.0, "WBB": 70.0}
-GRID = dict(k=[0.04, 0.07, 0.1], kp=[0.03, 0.06], regress=[0.5, 0.7], hca=[2.0, 3.0, 4.0])
+GRID = dict(k=[0.04, 0.07, 0.11], kp=[0.03, 0.06], regress=[0.5, 0.7, 0.85], hca=[2.0, 3.0, 4.0])
+RES_CAP = 30.0            # points per 100 possessions: the most one game can count above or below expectation
 PROP_STATS = ["min", "pts", "reb", "ast", "stl", "blk", "to", "tpm", "fgm", "ftm", "oreb", "dreb", "fp"]
 PROP_MAIN = ["pts", "reb", "ast", "stl", "blk", "to", "tpm", "fp"]     # markets books post: these keep their spread and last five
 
@@ -155,6 +156,8 @@ def run(G, p, lg, f, rest):
         m = (oh - oa) * pc / 100 + hca + b2b
         t = (oh + oa) * pc / 100
         out.append((g, m, t, pc))
+        if g.get("hdiv") == "non" or g.get("adiv") == "non":
+            continue                                     # games against non-Division I teams teach the ratings nothing
         gp = game_pace(g, f)
         if gp is None:
             # no box totals: learn from points alone, at the projected pace
@@ -163,14 +166,19 @@ def run(G, p, lg, f, rest):
             continue
         ah = (g["hp"] - hca / 2) / gp * 100
         aa = (g["ap"] + hca / 2) / gp * 100
-        k = p["k"] * (2.0 if N[h] < 5 or N[a] < 5 else 1.0)
-        eh, ea = ah - oh, aa - oa
+        k = p["k"] * (1.5 if N[h] < 5 or N[a] < 5 else 1.0)
+        cap = lambda x, c: max(-c, min(c, x))           # one blowout cannot move a team far
+        eh, ea = cap(ah - oh, RES_CAP), cap(aa - oa, RES_CAP)
         O[h] += k * eh; D[a] -= k * eh
         O[a] += k * ea; D[h] -= k * ea
-        ep = gp - pc
+        ep = cap(gp - pc, 12.0)
         P[h] += p["kp"] * ep / 2; P[a] += p["kp"] * ep / 2
         N[h] += 1; N[a] += 1
     return out, {"O": dict(O), "D": dict(D), "P": dict(P)}
+
+
+def d1(g):
+    return g.get("hdiv") != "non" and g.get("adiv") != "non"
 
 
 def tune(G, lg, f, rest, yrs):
@@ -178,7 +186,7 @@ def tune(G, lg, f, rest, yrs):
     for vals in itertools.product(*GRID.values()):
         p = dict(zip(GRID, vals))
         out, _ = run(G, p, lg, f, rest)
-        xs = [abs(g["hp"] - g["ap"] - m) for g, m, t, pc in out if yrs[0] <= g["season"] <= yrs[1]]
+        xs = [abs(g["hp"] - g["ap"] - m) for g, m, t, pc in out if yrs[0] <= g["season"] <= yrs[1] and d1(g)]
         if xs:
             e = st.mean(xs)
             if best is None or e < best[0]:
@@ -188,7 +196,7 @@ def tune(G, lg, f, rest, yrs):
     out, _ = run(G, dict(p, b2b=0.0), lg, f, rest)
     res = []
     for g, m, t, pc in out:
-        if not (yrs[0] <= g["season"] <= yrs[1]):
+        if not (yrs[0] <= g["season"] <= yrs[1]) or not d1(g):
             continue
         hb, ab = rest.get((g["id"], "h")) == 1, rest.get((g["id"], "a")) == 1
         if hb != ab:
@@ -206,7 +214,7 @@ def backtest(out, yrs):
     sp_w = sp_l = su_w = su_n = ou_w = ou_l = 0
     errs, mk_errs, terrs = [], [], []
     for g, m, t, pc in out:
-        if not (yrs[0] <= g["season"] <= yrs[1]):
+        if not (yrs[0] <= g["season"] <= yrs[1]) or not d1(g):
             continue
         d = g["hp"] - g["ap"]
         errs.append(abs(d - m))
