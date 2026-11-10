@@ -190,6 +190,120 @@ class Ledger(unittest.TestCase):
         self.assertEqual([x["src"] for x in g["model"]], ["ESPN BPI", "Dimers"])
         self.assertEqual(len(g["experts"]), 1)
 
+    def test_markets_and_stats(self):
+        p = {"pts": 28, "reb": 9, "ast": 4, "stl": 2, "blk": 1, "to": 3, "tpm": 3, "fgm": 10, "ftm": 5, "oreb": 2, "fp": 47.8}
+        for mk, v in [("Points", 28), ("Rebounds", 9), ("Assists", 4), ("Pts+Reb+Ast", 41), ("PRA", 41), ("Pts + Reb", 37),
+                      ("Reb+Ast", 13), ("3-PT Made", 3), ("3-Pointers Made", 3), ("Threes", 3), ("Blks+Stls", 3), ("Steals", 2),
+                      ("Turnovers", 3), ("Fantasy Score", 47.8), ("Double Double", 0), ("Offensive Rebounds", 2),
+                      ("Free Throws Made", 5), ("Field Goals Made", 10)]:
+            self.assertEqual(B.bb_stat(mk, p), v, mk)
+        self.assertEqual(B.bb_stat("Double Double", dict(p, reb=10)), 1)
+        self.assertIsNone(B.bb_stat("First Basket", p))
+        self.assertIsNone(B.bb_stat("Points (alt)", p))
+
+    def test_props_locked_and_graded_from_box(self):
+        tip = "2026-11-11T00:00Z"
+        self.put_feed("2026-11-10", [fgame("7", "NBA", tip, "Lakers", "Hawks", hl=-1.5, tot=236.5, hp=53.5)])
+        ctx = os.path.join(self.tmp.name, "ctx.json")
+        props = [{"pl": "Trae Young", "tm": "ATL", "mk": "Points", "ln": 24.5, "side": "O", "odds": "-115", "src": "Covers", "why": "x"},
+                 {"pl": "LeBron James", "tm": "LAL", "mk": "Pts+Reb+Ast", "ln": 38.5, "side": "U", "src": "Action", "why": "y"},
+                 {"pl": "Nobody", "mk": "Rebounds", "side": "O"}]                       # no line: dropped
+        wj({"NBA-lakers-hawks": {"props": props}}, ctx)
+        self.apply(self.run_ledger("2026-11-10T16:00:00Z", extra=["--ctx", ctx]))
+        g = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]
+        self.assertEqual([p["pl"] for p in g["props"]], ["Trae Young", "LeBron James"])
+        # a later refresh moves one line and adds a prop: positions are kept, the new one is appended
+        wj({"NBA-lakers-hawks": {"props": [dict(props[1], ln=37.5), {"pl": "Jalen Johnson", "tm": "ATL", "mk": "Rebounds", "ln": 8.5, "side": "O", "src": "SI", "why": "z"}]}}, ctx)
+        self.apply(self.run_ledger("2026-11-10T22:00:00Z", extra=["--ctx", ctx]))
+        g = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]
+        self.assertEqual([(p["pl"], p["ln"]) for p in g["props"]], [("Trae Young", 24.5), ("LeBron James", 37.5), ("Jalen Johnson", 8.5)])
+        snaps = self.doc("bbpregame", "2026-11-10")["snaps"]["NBA-lakers-hawks"]
+        self.assertEqual(len(snaps[-1]["props"]), 3)
+        # after tip a prop is added: shown, never graded (X)
+        self.put_feed("2026-11-10", [fgame("7", "NBA", tip, "Lakers", "Hawks", hl=-1.5, tot=236.5, state="in", sa=50, sh=48)])
+        self.apply(self.run_ledger("2026-11-11T00:30:00Z", slate=None))
+        late = os.path.join(self.docs, "bbslates/2026-11-10/leagues/NBA.json")
+        d = rj(late)
+        d["games"]["NBA-lakers-hawks"]["props"].append({"pl": "Late Add", "mk": "Points", "ln": 5.5, "side": "O"})
+        wj(d, late)
+        box = os.path.join(self.tmp.name, "box")
+        os.makedirs(box)
+        wj({"games": {"7": {"lg": "NBA", "players": [{"n": "Trae Young", "tm": "ATL", "pts": 31, "reb": 3, "ast": 11},
+                                                      {"n": "LeBron James", "tm": "LAL", "pts": 20, "reb": 8, "ast": 9}]}}},
+           os.path.join(box, "2026-11-10.json"))
+        self.put_feed("2026-11-10", [fgame("7", "NBA", tip, "Lakers", "Hawks", hl=-1.5, tot=236.5, state="post", sa=110, sh=112)])
+        self.apply(self.run_ledger("2026-11-11T03:00:00Z", slate=None, extra=["--box", box]))
+        g = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]
+        self.assertEqual(g["pv"][:2], [31, 37])
+        self.assertEqual(g["gr"]["props"][:2], ["W", "W"])                         # 31 > 24.5; 37 < 37.5
+        self.assertIsNone(g["gr"]["props"][2])                                     # Jalen Johnson: waiting on the box score
+        self.assertEqual(g["gr"]["props"][3], "X")
+        # a day later he is still missing: unresolved
+        self.apply(self.run_ledger("2026-11-12T08:00:00Z", slate=None, extra=["--box", box]))
+        g = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]
+        self.assertEqual(g["gr"]["props"], ["W", "W", "U", "X"])
+        self.assertEqual(self.doc("bbresults", "2026-11-10")["games"]["NBA-lakers-hawks"]["props"], {"W": 2, "L": 0, "P": 0, "U": 1})
+
+    def test_total_lean_and_star(self):
+        tip = "2026-11-11T00:00Z"
+        g = fgame("7", "NBA", tip, "Lakers", "Hawks", hl=-1.5, tot=226.5, hp=50.5)
+        g["qopen"] = {"DraftKings": {"book": "DraftKings", "spread": {"A": [3.5, -110], "H": [-3.5, -110]}, "total": {"O": [222.5, -110], "U": [222.5, -110]}}}
+        self.put_feed("2026-11-10", [g])
+        ctx = os.path.join(self.tmp.name, "ctx.json")
+        # spread case weak (BPI near a pick'em vs Hawks -1.5); totals: three projections well over and two Over picks
+        wj({"NBA-lakers-hawks": {"model": [{"src": "DRatings", "t": 236.0}, {"src": "Dimers", "fav": "H", "m": 1.0, "t": 234.0}],
+                                 "experts": [{"src": "Covers", "pick": "Over 226.5", "side": "O"}, {"src": "SI", "pick": "Over 226.5", "side": "O"}]}}, ctx)
+        self.apply(self.run_ledger("2026-11-10T16:00:00Z", extra=["--ctx", ctx]))
+        g = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]
+        self.assertEqual((g["lean"]["mk"], g["lean"]["side"], g["lean"]["ln"], g["lean"]["conf"]), ("total", "O", 226.5, 2))
+        # the total rose 4 points since it opened, toward the Over: a market signal, so the lean is a star
+        self.assertTrue(g["star"])
+        self.assertIn("moved 4 toward the Over", g["starWhy"])
+
+    def test_star_cap_per_day(self):
+        tip = "2026-11-11T00:00Z"
+        games, ctx = [], {}
+        for i in range(5):
+            g = fgame(str(i), "MBB", tip, f"Away{i}", f"Home{i}", hl=-5.5, tot=140.5, hp=60.0)
+            games.append(g)
+            ctx[f"MBB-away{i}-home{i}"] = {"model": [{"src": "T-Rank", "fav": "H", "m": 12.0 + i}, {"src": "KenPom", "fav": "H", "m": 11.0 + i}],
+                                           "experts": [{"src": "Covers", "side": "H", "pick": f"Home{i} -5.5"}],
+                                           "signal": "Reverse line movement toward the home side (Action Network)"}
+        self.put_feed("2026-11-10", games)
+        path = os.path.join(self.tmp.name, "ctx.json")
+        wj(ctx, path)
+        self.apply(self.run_ledger("2026-11-10T16:00:00Z", extra=["--ctx", path]))
+        gs = self.doc("bbslates/2026-11-10/leagues", "MBB")["games"]
+        stars = sorted(gid for gid, g in gs.items() if g["star"])
+        self.assertEqual(len(stars), B.MAX_STARS)
+        self.assertEqual(stars, ["MBB-away2-home2", "MBB-away3-home3", "MBB-away4-home4"])   # the strongest cases
+        self.assertTrue(all(g["lean"]["conf"] == 2 for g in gs.values()))
+
+    def test_ledger_model_numbers_and_gates(self):
+        tip = "2026-11-11T00:00Z"
+        self.put_feed("2026-11-10", [fgame("7", "NBA", tip, "Lakers", "Hawks", hl=-1.5, tot=236.5, hp=53.5)])
+        model = os.path.join(self.tmp.name, "bb_model.json")
+        wj({"updatedAt": "2026-11-10T12:00:00+00:00", "leagues": {"NBA": {
+            "ratings": {"17": {"r": 2.0, "o": 1.0, "d": -1.0}, "27": {"r": -1.0, "o": 0.5, "d": 0.5}},
+            "state": {"hfa": 2.5, "lg": 115.0, "asof": "2026-11-09"},
+            "push": {"margin": {"1.5": {"n0": -3, "p": [0.04, 0.05, 0.05, 0.05], "lo": 0.4, "hi": 0.41}}},
+            "spread": {"pass": False, "t": 0.5}, "total": {"pass": False}, "ml": {"pass": False}}}}, model)
+        self.apply(self.run_ledger("2026-11-10T16:00:00Z", extra=["--model", model]))
+        pg = self.doc("bbpregame", "2026-11-10")
+        ent = pg["games"]["NBA-lakers-hawks"]
+        # home Hawks id "27", away Lakers "17": -1 - 2 + 2.5 = -0.5 (Lakers by half a point); total 230 + (0.5 + 1.0) - (0.5 - 1.0) = 232
+        self.assertEqual(ent["lm"]["m"], -0.5)
+        self.assertEqual(ent["lm"]["t"], 232.0)
+        self.assertEqual(ent["pmf"]["m"]["n0"], -3)
+        self.assertIn("NBA", pg["gates"]["leagues"])
+        self.assertEqual(pg["coverage"], {"tracked": 1, "priced": 1})
+        self.assertEqual(pg["preds"]["NBA-lakers-hawks"][0]["model"], "bb-ledger-v1")
+        # at tip the prediction made before tip is locked with the pick
+        self.put_feed("2026-11-10", [fgame("7", "NBA", tip, "Lakers", "Hawks", hl=-1.5, tot=236.5, state="in", sa=50, sh=48)])
+        self.apply(self.run_ledger("2026-11-11T00:30:00Z", slate=None, extra=["--model", model]))
+        g = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]
+        self.assertEqual(g["lock"]["lm"]["m"], -0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

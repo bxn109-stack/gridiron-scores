@@ -6,23 +6,32 @@ team matching, grading, pick-lock and hash-chain helpers from apply_scores.py (w
 never reads or writes a football document.
 
   python3 bb_ledger.py --docs DIR --out OUT --slate YYYY-MM-DD [--ctx ctx.json] [--feed URL|DIR] [--now ISO]
+                       [--box URL|DIR] [--model URL|PATH] [--cm URL|PATH]
   python3 bb_ledger.py --list --slate YYYY-MM-DD [--feed URL|DIR]     # tonight's games with a line, one per line
   python3 bb_ledger.py --docs DIR --out OUT --grade-only               # lock and grade only, no board build
 
 DIR holds the docs saved by ArtifactData (out_dir):
   DIR/meta/bbconfig.json, DIR/bbslates/<date>/leagues/<NBA|WNBA|MBB|WBB>.json, DIR/bbpregame/<date>.json,
-  DIR/bbresults/<date>.json. Missing docs are fine.
+  DIR/bbresults/<date>.json, DIR/bbcmresults/<date>.json. Missing docs are fine.
 
 Board build (for --slate): every game on that US Eastern date with a posted spread gets a GAME object (football
 schema). The line is DraftKings' number from ESPN. The projections are ESPN's pregame win chance (BPI, from the
-robot) converted to a margin, plus any projections and expert picks Claude found and wrote to ctx.json:
-  {"<gameId>": {"model": [{src, fav: "A"|"H", m?, p?}], "experts": [{src, pick, side: "A"|"H"}],
-                "desc": str, "facts": [str], "inj": str}}
-The lean follows the runbook's LEAN METHOD. Games within 15 minutes of tip, started or finished are never touched.
+robot) converted to a margin, plus any projections, expert picks and player props Claude found (ctx.json):
+  {"<gameId>": {"model": [{src, fav: "A"|"H", m?, p?, t?}],          t = the source's projected total
+                "experts": [{src, pick, side: "A"|"H"|"O"|"U"}],       O/U = a pick on the total
+                "props": [{pl, tm, mk, ln, side: "O"|"U"|"Y", odds?, src, why}],
+                "signal": "market signal with its source (e.g. reverse line movement, Action Network)",
+                "desc": str, "facts": [str], "inj": str, "out": ["players ruled out"]}}
+The lean follows the football LEAN METHOD (spread, or the total when it clearly beats the spread case), and stars
+follow the football star rules (a confidence-2 lean, an independent market signal and a fair price; at most
+MAX_STARS a day). Props are appended (never reordered or removed: saved slips point at them by position). Games within
+15 minutes of tip, started or finished are never touched.
 
-Grading: picks are locked at tip from the last copy saved before tip (verified), exactly as football; finished games
-are graded (straight up, lean) and written to bbresults/<date>; sportsbook quotes and the pick history go to
-bbpregame/<date>; meta/bblive gets a one-line note. Prints a JSON manifest of writes:
+Grading: picks (line, lean, star, props) are locked at tip from the last copy saved before tip (verified), exactly as
+football; finished games are graded (straight up, lean, star, props from the robot's box scores) into
+bbresults/<date>. Sportsbook quotes, the pick history, the Ledger Model's numbers, push tables and gates
+(model/results/bb_model.json) go to bbpregame/<date>; the Claude Model's cards (from model/results/bb_cm.json) are
+built before tip and graded into bbcmresults/<date>; meta/bblive gets a one-line note. Prints a JSON manifest:
   [{"op": "update"|"set", "collection": ..., "doc_id": ..., "file_path": ...}, ...]
 """
 import argparse
@@ -38,11 +47,16 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import apply_scores as A  # noqa: E402  (football grader: helpers only)
 
-RAW = "https://raw.githubusercontent.com/bxn109-stack/gridiron-scores/main/scores/bb"
+ROOT_URL = "https://raw.githubusercontent.com/bxn109-stack/gridiron-scores/main"
+RAW = f"{ROOT_URL}/scores/bb"
 UTC = dt.timezone.utc
 ET = A.ET
 LEAGUES = ("NBA", "WNBA", "MBB", "WBB")
 COLLEGE = {"MBB", "WBB"}
+MAX_STARS = 3                                   # stars per day across all leagues (football: 2-6 a week)
+MOVE = {"NBA": 1.0, "WNBA": 1.0, "MBB": 1.5, "WBB": 1.5}   # line move since the open that counts as a market signal
+TOT_DIV = 4.5                                   # totals: points of edge per score point (spreads use 3)
+WORST_PRICE = -115                              # a star's price must be at least this good
 # Scale that turns a win chance into a projected margin (margin = SIG * inverse-normal(chance)). Fitted to posted
 # DraftKings spreads against ESPN BPI chances on Nov 9-10, 2026 (MBB 39 games -> 14.1, NBA 9 -> 10.8, WBB 2 -> 16.1),
 # so BPI margins sit on the market's scale on average and the leans are not tilted toward underdogs by the conversion.
@@ -156,20 +170,22 @@ def home_margin(x, sig):
     return float(m) if fav == "H" else -float(m)
 
 
-def lean_for(g):
+def spread_case(g):
+    """(lean, score) on the spread, or (None, 0)."""
     line = g.get("line") or {}
     sp, fav = line.get("sp"), line.get("fav")
     if sp is None or fav not in ("A", "H"):
-        return None
+        return None, 0.0
     sig = SIG.get(g["lg"], 11.0)
     projs = [(x.get("src"), home_margin(x, sig)) for x in g.get("model") or []]
     projs = [(s, v) for s, v in projs if v is not None]
     if not projs:
-        return None
+        return None, 0.0
     line_hm = sp if fav == "H" else -sp
     avg = statistics.mean(v for _, v in projs)
     diff = avg - line_hm
-    votes = sum(1 if x.get("side") == "H" else -1 if x.get("side") == "A" else 0 for x in g.get("experts") or [])
+    xs = [x for x in g.get("experts") or [] if x.get("side") in ("A", "H")]
+    votes = sum(1 if x["side"] == "H" else -1 for x in xs)
     score = clamp(diff / 3, -1.5, 1.5) + clamp(0.5 * votes, -1, 1)
     side = "H" if score > 0 else "A"
     conf = 1
@@ -178,12 +194,93 @@ def lean_for(g):
     ln = 0.0 if sp == 0 else (-sp if side == fav else sp)
     names = {"A": g["a"]["n"], "H": g["h"]["n"]}
     pf = "H" if avg >= 0 else "A"
-    src = projs[0][0] if len(projs) == 1 else f"{len(projs)} projections"
-    why = f"{src} {'has' if len(projs) == 1 else 'average'} {names[pf]} by {abs(avg):.1f} against a line of {names[fav]} {fmt_ln(-sp)}"
-    why += f", so the value side is {names[side]} {fmt_ln(ln)}."
+    n = len(projs)
+    why = (f"Projections ({n}) average {names[pf]} by {abs(avg):.1f}" if n > 1 else f"Projections (1) from {projs[0][0]} have {names[pf]} by {abs(avg):.1f}")
+    why += f" against a line of {names[fav]} {fmt_ln(-sp)}, so the value side is {names[side]} {fmt_ln(ln)}."
     if votes:
-        why += f" Expert picks lean {names['H' if votes > 0 else 'A']} ({abs(votes)} net)."
-    return {"mk": "spread", "side": side, "ln": ln, "conf": conf, "why": why}
+        why += f" Expert picks: net {abs(votes)} toward {names['H' if votes > 0 else 'A']}."
+    elif xs:
+        why += " Expert picks: net even."
+    return {"mk": "spread", "side": side, "ln": ln, "conf": conf, "why": why}, score
+
+
+def total_case(g):
+    """(lean, score) on the total from projected totals (t) and expert total picks, or (None, 0)."""
+    tot = (g.get("line") or {}).get("tot")
+    if tot is None:
+        return None, 0.0
+    projs = [(x.get("src"), float(x["t"])) for x in g.get("model") or [] if isinstance(x.get("t"), (int, float))]
+    if not projs:
+        return None, 0.0
+    avg = statistics.mean(v for _, v in projs)
+    diff = avg - tot
+    xs = [x for x in g.get("experts") or [] if x.get("side") in ("O", "U")]
+    votes = sum(1 if x["side"] == "O" else -1 for x in xs)
+    score = clamp(diff / TOT_DIV, -1.5, 1.5) + clamp(0.5 * votes, -1, 1)
+    side = "O" if score > 0 else "U"
+    conf = 2 if abs(score) >= 1.25 and votes and (diff > 0) == (votes > 0) and len(projs) >= 2 else 1
+    why = f"Projected totals ({len(projs)}) average {avg:.1f} against a total of {tot:g}, so the lean is the {'Over' if side == 'O' else 'Under'}."
+    if votes:
+        why += f" Expert picks: net {abs(votes)} toward the {'Over' if votes > 0 else 'Under'}."
+    return {"mk": "total", "side": side, "ln": float(tot), "conf": conf, "why": why}, score
+
+
+def lean_eval(g):
+    """The LEAN METHOD: the spread lean, unless the total case clearly favors the total (a confidence-2 total case,
+    a confidence-1 spread case and a bigger score). Returns (lean, score)."""
+    sl, ss = spread_case(g)
+    tl, ts = total_case(g)
+    if tl and tl["conf"] == 2 and (not sl or (sl["conf"] == 1 and abs(ts) > abs(ss))):
+        return tl, ts
+    return sl, ss
+
+
+def lean_for(g):
+    return lean_eval(g)[0]
+
+
+def side_quote(e, lean, swapped=False):
+    """DraftKings' (or the first book's) current and opening number and price for the lean's side, in the game's
+    orientation: (line now, price now, line at open)."""
+    if not lean or not e:
+        return None, None, None
+    mk, side = lean["mk"], lean["side"]
+    key = {"spread": "spread", "total": "total"}.get(mk)
+    if not key:
+        return None, None, None
+    sel = {"A": "H", "H": "A"}.get(side, side) if swapped and key == "spread" else side
+
+    def pick(qs):
+        q = (qs or {}).get("DraftKings") or next(iter((qs or {}).values()), None)
+        v = ((q or {}).get(key) or {}).get(sel)
+        return (v[0], v[1]) if v and v[0] is not None else (None, None)
+    now_ln, now_p = pick(e.get("quotes") or e.get("qclose"))
+    open_ln, _ = pick(e.get("qopen"))
+    return now_ln, now_p, open_ln
+
+
+def star_case(g, e, score, signal):
+    """Football's star rules: a confidence-2 lean, at least one independent market signal (the line moving toward the
+    side since it opened, or a signal Claude found and sourced), and a price at least as good as WORST_PRICE.
+    Returns starWhy or None."""
+    lean = g.get("lean")
+    if not lean or lean.get("conf", 1) < 2 or lean["mk"] not in ("spread", "total"):
+        return None
+    now_ln, price, open_ln = side_quote(e, lean)
+    names = {"A": g["a"]["n"], "H": g["h"]["n"], "O": "the Over", "U": "the Under"}
+    sigs = []
+    if now_ln is not None and open_ln is not None:
+        # a spread moving toward the side makes that side's number worse (smaller); a total moving toward the Over rises
+        moved = (open_ln - now_ln) if lean["mk"] == "spread" else ((now_ln - open_ln) if lean["side"] == "O" else (open_ln - now_ln))
+        if moved >= MOVE.get(g["lg"], 1.5):
+            sigs.append(f"the line moved {moved:g} toward {names[lean['side']]} since it opened ({fmt_ln(open_ln) if lean['mk'] == 'spread' else f'{open_ln:g}'} to "
+                        f"{fmt_ln(now_ln) if lean['mk'] == 'spread' else f'{now_ln:g}'} at DraftKings)")
+    if signal:
+        sigs.append(str(signal).strip().rstrip("."))
+    if not sigs or price is None or price < WORST_PRICE:
+        return None
+    return (f"Confidence-2 lean (projections and expert picks agree, score {abs(score):.2f}), plus " + "; ".join(sigs)
+            + f"; price {'+' if price > 0 else ''}{price} at DraftKings.")
 
 
 # ---------- board build ----------
@@ -205,14 +302,38 @@ def describe(e, lg):
     return s + (", neutral site." if e.get("neutral") else ".")
 
 
+PROP_KEYS = ("pl", "tm", "mk", "ln", "side", "odds", "src", "why")
+
+
+def merge_props(old, new):
+    """Existing props keep their position (saved slips point at them by index); a prop for the same player and market
+    is updated in place before tip; new ones are appended. Props need a player, a market, a side and (except Yes
+    props) a line."""
+    out = [dict(p) for p in old or []]
+    idx = {(A.pnorm(p.get("pl")), A.norm(p.get("mk"))): i for i, p in enumerate(out)}
+    for p in new or []:
+        if not isinstance(p, dict) or not p.get("pl") or not p.get("mk") or p.get("side") not in ("O", "U", "Y"):
+            continue
+        if p["side"] != "Y" and not isinstance(p.get("ln"), (int, float)):
+            continue
+        clean = {k: p.get(k) for k in PROP_KEYS if p.get(k) is not None}
+        k = (A.pnorm(p["pl"]), A.norm(p["mk"]))
+        if k in idx:
+            out[idx[k]] = clean
+        else:
+            idx[k] = len(out)
+            out.append(clean)
+    return out
+
+
 def build_game(e, lg, old, ctx, now):
     fav, sp, tot, book = book_line(e)
     gid = old.get("id") if old else game_id(lg, e)
     c = ctx.get(gid) or ctx.get(e["id"]) or {}
     model = [m for m in [bpi_entry(e, lg)] if m]
     for x in c.get("model") or []:
-        if isinstance(x, dict) and x.get("src") and x.get("fav") in ("A", "H"):
-            model.append({k: x.get(k) for k in ("src", "fav", "m", "p") if x.get(k) is not None})
+        if isinstance(x, dict) and x.get("src") and (x.get("fav") in ("A", "H") or isinstance(x.get("t"), (int, float))):
+            model.append({k: x.get(k) for k in ("src", "fav", "m", "p", "t") if x.get(k) is not None})
     experts = [{k: x.get(k) for k in ("src", "pick", "side", "score") if x.get(k) is not None}
                for x in c.get("experts") or [] if isinstance(x, dict) and x.get("src")]
     if not experts and old:
@@ -230,22 +351,48 @@ def build_game(e, lg, old, ctx, now):
         "desc": c.get("desc") or (old or {}).get("desc") or describe(e, lg),
         "facts": c.get("facts") or (old or {}).get("facts") or [],
         "inj": c.get("inj") or (old or {}).get("inj"),
-        "props": (old or {}).get("props") or [],
+        "props": merge_props((old or {}).get("props"), c.get("props")),
         "st": "pre", "sc": None, "clk": None, "tracked": True, "gr": None,
     }
-    lean = lean_for(g)
-    if old and old.get("lean") and lean and (old["lean"].get("side"), old["lean"].get("ln")) != (lean["side"], lean["ln"]):
+    if c.get("out") or (old or {}).get("out"):
+        g["out"] = [str(x) for x in (c.get("out") or (old or {}).get("out"))][:20]
+    if c.get("signal") or (old or {}).get("signal"):
+        g["signal"] = str(c.get("signal") or old.get("signal"))[:300]
+    lean, score = lean_eval(g)
+    if old and old.get("lean") and lean and (old["lean"].get("mk"), old["lean"].get("side"), old["lean"].get("ln")) != (lean["mk"], lean["side"], lean["ln"]):
         lean["why"] = f"Updated {now.astimezone(ET).strftime('%a %-I:%M %p')}: " + lean["why"]
     elif old and old.get("lean") and lean and old["lean"].get("why", "").startswith("Updated ") and \
-            (old["lean"].get("side"), old["lean"].get("ln")) == (lean["side"], lean["ln"]):
+            (old["lean"].get("mk"), old["lean"].get("side"), old["lean"].get("ln")) == (lean["mk"], lean["side"], lean["ln"]):
         lean["why"] = old["lean"]["why"].split(": ", 1)[0] + ": " + lean["why"]
     g["lean"] = lean
+    g["_score"] = score
+    g["_star"] = star_case(g, e, score, g.get("signal"))
     return g
+
+
+def assign_stars(slate, built, docs, now):
+    """At most MAX_STARS stars a day: games already within 15 minutes of tip keep theirs and count first; the rest go to
+    the qualifying games with the strongest lean scores. A star that no longer qualifies is taken off before tip."""
+    locked = 0
+    for lg, doc in docs.items():
+        for gid, g in (doc.get("games") or {}).items():
+            ko = A.when(g.get("ko"))
+            if g.get("star") and ko and (ko - now <= LOCK_BEFORE or g.get("st") not in (None, "pre")) and gid not in (built.get(lg) or {}):
+                locked += 1
+    cands = sorted(((abs(g.get("_score", 0)), lg, gid) for lg, gs in built.items() for gid, g in gs.items() if g.get("_star")), reverse=True)
+    keep = {(lg, gid) for _, lg, gid in cands[:max(0, MAX_STARS - locked)]}
+    for lg, gs in built.items():
+        for gid, g in gs.items():
+            on = (lg, gid) in keep
+            g["star"], g["starWhy"] = on, (g["_star"] if on else "")
+            g.pop("_star", None)
+            g.pop("_score", None)
 
 
 def build(slate, feed_day, docs, ctx, now, leagues):
     """New/updated games per league for the slate date. Returns ({lg: {gid: game or changed fields}}, new game count)."""
     out, n_new = {}, 0
+    full = {}
     by_eid = {}
     for lg in leagues:
         for gid, g in ((docs.get(lg) or {}).get("games") or {}).items():
@@ -269,20 +416,26 @@ def build(slate, feed_day, docs, ctx, now, leagues):
         if sp is None and old:
             g["line"] = old.get("line")
             g["lean"] = old.get("lean")
-        keep = ("lock", "lockdiff", "clv", "pv", "per")
+            g["_star"] = g["_star"] if old.get("star") else None
+        keep = ("lock", "lockdiff", "clv", "pv", "per", "cm", "cmgr", "cmpv", "cmpa")
         for k in keep:
             if old and k in old:
                 g[k] = old[k]
-        if old:
-            changed = {k: v for k, v in g.items() if old.get(k) != v}
-            if changed:
-                out.setdefault(lg, {})[old["id"]] = changed
-        else:
-            ids = set((docs.get(lg) or {}).get("games") or {}) | set(out.get(lg) or {})
+        if not old:
+            ids = set((docs.get(lg) or {}).get("games") or {}) | set(full.get(lg) or {})
             if g["id"] in ids:
                 g["id"] = f"{g['id']}-{e['id']}"
-            out.setdefault(lg, {})[g["id"]] = g
             n_new += 1
+        full.setdefault(lg, {})[old["id"] if old else g["id"]] = (g, old)
+    assign_stars(slate, {lg: {gid: g for gid, (g, _) in gs.items()} for lg, gs in full.items()}, docs, now)
+    for lg, gs in full.items():
+        for gid, (g, old) in gs.items():
+            if old:
+                changed = {k: v for k, v in g.items() if old.get(k) != v}
+                if changed:
+                    out.setdefault(lg, {})[gid] = changed
+            else:
+                out.setdefault(lg, {})[gid] = g
     return out, n_new
 
 
@@ -295,7 +448,8 @@ def snap_of(g):
     line, lean = g.get("line") or {}, g.get("lean")
     return {"line": {k: line.get(k) for k in ("fav", "sp", "tot")},
             "lean": {k: lean.get(k) for k in ("mk", "side", "team", "ln", "conf") if k in lean} if lean else None,
-            "star": bool(g.get("star")), "props": []}
+            "star": bool(g.get("star")),
+            "props": [{k: p.get(k) for k in ("pl", "mk", "ln", "side", "odds")} for p in (g.get("props") or [])]}
 
 
 def lock_diff(g, lock):
@@ -304,7 +458,98 @@ def lock_diff(g, lock):
 
 
 def finished(g):
-    return g.get("st") == "final" and (not g.get("tracked") or bool(g.get("gr")))
+    """Final, graded, and every prop valued or settled (a prop waits for the box score)."""
+    if g.get("st") != "final":
+        return False
+    if not g.get("tracked"):
+        return True
+    gr = g.get("gr")
+    if not gr:
+        return False
+    props = g.get("props") or []
+    if props and (len(gr.get("props") or []) < len(props) or None in gr["props"]):
+        return False
+    if g.get("cm") and g["cm"].get("tracked") is not False and not g.get("cmgr"):
+        return False
+    return True
+
+
+# ---------- player props ----------
+WORD = {"pts": "pts", "points": "pts", "point": "pts", "reb": "reb", "rebs": "reb", "rebounds": "reb", "rebound": "reb",
+        "ast": "ast", "asts": "ast", "assists": "ast", "assist": "ast", "stl": "stl", "stls": "stl", "steals": "stl",
+        "steal": "stl", "blk": "blk", "blks": "blk", "blocks": "blk", "block": "blk", "blocked": "blk",
+        "to": "to", "tos": "to", "turnovers": "to", "turnover": "to", "pra": ("pts", "reb", "ast")}
+THREE = {"3", "3pt", "3pm", "3pts", "3s", "three", "threes", "3pointers", "3pointer", "pointers", "pointer"}
+
+
+def bb_market(mk):
+    """A basketball prop market -> the box-score fields it adds up (tuple), "fp", "dd", "td" or None (not gradable)."""
+    m = A.norm(mk)
+    if not m or "first" in m.split() or "alt" in m.split() or "(" in str(mk or ""):
+        return None
+    if "fantasy" in m:
+        return "fp"
+    if "double double" in m:
+        return "dd"
+    if "triple double" in m:
+        return "td"
+    w = m.replace("3 pointers", "3pointers").replace("3 pt", "3pt").replace("3 point", "3pt").split()
+    att = "attempted" in w or "attempts" in w or "att" in w
+    if "offensive" in w and any(x.startswith("reb") for x in w):
+        return ("oreb",)
+    if "defensive" in w and any(x.startswith("reb") for x in w):
+        return ("dreb",)
+    if any(x in THREE for x in w):
+        return ("tpa",) if att else ("tpm",)
+    if "minutes" in w or w == ["min"]:
+        return ("min",)
+    if ("field" in w and "goals" in w) or "fg" in w or "fgm" in w:
+        return ("fga",) if att else ("fgm",)
+    if ("free" in w and "throws" in w) or "ft" in w or "ftm" in w:
+        return ("fta",) if att else ("ftm",)
+    parts = []
+    for x in w:
+        v = WORD.get(x)
+        if isinstance(v, tuple):
+            parts.extend(v)
+        elif v:
+            parts.append(v)
+    return tuple(dict.fromkeys(parts)) or None
+
+
+def bb_stat(mk, p):
+    """The player's number for a market from a box-score line, or None when it cannot be read."""
+    kind = bb_market(mk)
+    if kind is None:
+        return None
+    g = lambda k: p.get(k) or 0
+    if kind == "fp":
+        return p.get("fp")
+    if kind in ("dd", "td"):
+        n = sum(1 for k in ("pts", "reb", "ast", "stl", "blk") if g(k) >= 10)
+        return 1 if n >= (2 if kind == "dd" else 3) else 0
+    return sum(g(k) for k in kind)
+
+
+# ---------- the Ledger Model (model/results/bb_model.json) ----------
+def model_numbers(M, lg, e, swapped):
+    """Ledger Model margin (ledger home minus away) and total for an ESPN game, or None without both ratings."""
+    L = ((M or {}).get("leagues") or {}).get(lg) or {}
+    R = L.get("ratings") or {}
+    h, a = R.get(str((e.get("home") or {}).get("id"))), R.get(str((e.get("away") or {}).get("id")))
+    if not h or not a:
+        return None
+    st_ = L.get("state") or {}
+    m = h["r"] - a["r"] + (0.0 if e.get("neutral") else (st_.get("hfa") or 0.0))
+    t = 2 * (st_.get("lg") or 0) + h["o"] + a["o"] - h["d"] - a["d"]
+    return {"m": round(-m if swapped else m, 1), "t": round(t, 1), "v": (M or {}).get("updatedAt")}
+
+
+def gates_of(M):
+    if not M:
+        return None
+    g = A.gates_summary({"updatedAt": M.get("updatedAt"), "leagues": {k: v for k, v in (M.get("leagues") or {}).items() if k in LEAGUES}}, None)
+    return g if g.get("leagues") else None
 
 
 def match_bb(g, pool):
@@ -312,11 +557,26 @@ def match_bb(g, pool):
     return A.match(dict(g, lg="_" + g["lg"]), [e for e in pool if e.get("lg") == g["lg"]])
 
 
-def grade_docs(docs_by_slate, pre_old, feed, now, now_iso, pool_cache):
+def grade_docs(docs_by_slate, pre_old, feed, now, now_iso, pool_cache, opts=None):
     """Lock, live-update and grade. Returns (league changes {(slate, lg): {gid: ch}}, pregame {slate: body parts},
-    results {slate: {gid: row}}, counters)."""
+    results {slate: {gid: row}}, counters). opts: box (URL|dir of box/bb), M (Ledger Model results)."""
+    opts = opts or {}
+    M, box_src = opts.get("M"), opts.get("box")
     changes, pregame, results = {}, {}, {}
-    n = {"upd": 0, "graded": 0, "lock": 0, "ver": 0, "late": 0, "unmatched": []}
+    n = {"upd": 0, "graded": 0, "lock": 0, "ver": 0, "late": 0, "unmatched": [], "void": 0, "gaps": 0}
+    box_cache = {}
+
+    def box(d):
+        if d not in box_cache:
+            box_cache[d] = {}
+            if box_src:
+                src = f"{box_src}/{d.isoformat()}.json" if re.match(r"https?://", box_src) else os.path.join(box_src, f"{d.isoformat()}.json")
+                try:
+                    box_cache[d] = (A.load(src) or {}).get("games") or {}
+                except Exception as ex:
+                    print(f"box {d}: {ex}", file=sys.stderr)
+        return box_cache[d]
+
     for slate, lgdocs in sorted(docs_by_slate.items()):
         d0 = dt.date.fromisoformat(slate)
         pool, by_id = [], {}
@@ -328,7 +588,7 @@ def grade_docs(docs_by_slate, pre_old, feed, now, now_iso, pool_cache):
                     by_id[e["id"]] = e
                     pool.append(e)
         old_pg = pre_old.get(slate) or {}
-        pg = pregame.setdefault(slate, {"games": {}, "snaps": {}})
+        pg = pregame.setdefault(slate, {"games": {}, "snaps": {}, "preds": {}})
         for lg, doc in lgdocs.items():
             for gid, g in (doc.get("games") or {}).items():
                 ko = A.when(g.get("ko"))
@@ -339,17 +599,40 @@ def grade_docs(docs_by_slate, pre_old, feed, now, now_iso, pool_cache):
                 if not e:
                     e, swapped = match_bb(g, pool)
                 old_snaps = list(((old_pg.get("snaps") or {}).get(gid)) or [])
+                old_preds = list(((old_pg.get("preds") or {}).get(gid)) or [])
                 if ko > now:
                     snap = snap_of(g)
                     last = {k: v for k, v in (old_snaps[-1] if old_snaps else {}).items() if k not in ("at", "h")}
                     if snap != last:
                         pg["snaps"][gid] = old_snaps + [dict(snap, at=now_iso, h=A.chain(old_snaps[-1].get("h") if old_snaps else None, snap, now_iso))]
                 old_ent = (old_pg.get("games") or {}).get(gid) or {}
-                if e and (e.get("quotes") or e.get("qopen") or e.get("qclose")):
+                if e and (e.get("quotes") or e.get("qopen") or e.get("qclose") or (ko > now and M)):
                     ent = {"state": e.get("state"), "quotes": e.get("quotes") if e.get("state") == "pre" else None,
                            "open": e.get("qopen"), "close": e.get("qclose")}
                     if swapped:
                         ent = {k: A.swap_quotes(v) if k != "state" else v for k, v in ent.items()}
+                    if ko > now and M:
+                        close_e = e.get("close")
+                        if close_e and swapped:
+                            close_e = dict(close_e, hm=-close_e["hm"] if close_e.get("hm") is not None else None)
+                        hm, tot = A.market_numbers(ent.get("quotes") or ent.get("close") or ent.get("open"), close_e, g.get("line"))
+                        push = ((M.get("leagues") or {}).get(lg) or {}).get("push") or {}
+                        pm = {"m": A.pmf_row(push.get("margin"), hm), "t": A.pmf_row(push.get("total"), tot)}
+                        if pm["m"] or pm["t"]:
+                            ent["pmf"] = pm
+                        lm = model_numbers(M, lg, e, swapped)
+                        if lm:
+                            ent["lm"] = lm
+                            L_ = (M.get("leagues") or {}).get(lg) or {}
+                            rec = {"model": "bb-ledger-v1", "version": M.get("updatedAt"), "asof": (L_.get("state") or {}).get("asof"),
+                                   "m": lm["m"], "t": lm["t"], "pp": None}
+                            prev = next((x for x in reversed(old_preds) if x.get("model") == rec["model"]), None)
+                            if {k: (prev or {}).get(k) for k in A.PRED_KEYS} != rec:
+                                pg["preds"][gid] = old_preds + [dict(rec, at=now_iso, h=A.chain(old_preds[-1].get("h") if old_preds else None, rec, now_iso))]
+                    else:
+                        for k in ("pmf", "lm"):
+                            if old_ent.get(k) is not None:
+                                ent[k] = old_ent[k]
                     if old_ent != ent:
                         pg["games"][gid] = ent
                 if ko > now + dt.timedelta(hours=1):
@@ -379,6 +662,11 @@ def grade_docs(docs_by_slate, pre_old, feed, now, now_iso, pool_cache):
                     if late:
                         lock["late"] = True
                         n["late"] += 1
+                    # the model's last prediction made before tip from data that ended before tip; none = unavailable
+                    okp = [x for x in old_preds if A.when(x.get("at")) and A.when(x["at"]) < ko and (not x.get("asof") or A.when_any(x["asof"]) < ko)]
+                    if okp and okp[-1].get("m") is not None:
+                        lp = okp[-1]
+                        lock["lm"] = {"m": lp["m"], "t": lp.get("t"), "at": lp["at"], "version": lp.get("version"), "model": lp.get("model")}
                     ch["lock"] = lock
                     n["lock"] += 1
                 if lock:
@@ -386,9 +674,19 @@ def grade_docs(docs_by_slate, pre_old, feed, now, now_iso, pool_cache):
                     if diff != (g.get("lockdiff") or []):
                         ch["lockdiff"] = diff
                 gl = dict(g, line=dict(g.get("line") or {}, **(lock["line"] or {})), lean=lock["lean"], star=lock["star"]) if lock else g
-                if state in ("in", "post") and g.get("tracked") and g.get("clv") is None:
-                    cv = A.clv_of(gl, e.get("close"), swapped) if not (lock or {}).get("late") else None
-                    if cv is not None:
+                lprops = (lock.get("props") if lock else None)
+                if lprops is None:
+                    lprops = [{k: p.get(k) for k in ("pl", "mk", "ln", "side")} for p in (g.get("props") or [])]
+                if state in ("in", "post") and g.get("tracked") and (g.get("clv") is None or ("p" not in (g.get("clv") or {}) and not g.get("clvp"))):
+                    cv = g.get("clv") or (A.clv_of(gl, e.get("close"), swapped) if not (lock or {}).get("late") else None)
+                    pre_ent = pg["games"].get(gid) or old_ent
+                    cbooks = e.get("qclose")
+                    if cbooks and swapped:
+                        cbooks = A.swap_quotes(cbooks)
+                    cc = A.closing_chance(gl, cbooks, pre_ent.get("pmf")) if not (lock or {}).get("late") else None
+                    if cc is not None:
+                        cv = dict(cv or {}, p=cc["p"], push=cc["push"])
+                    if cv is not None and cv != g.get("clv"):
                         ch["clv"] = cv
                 if state == "pre" or ea.get("score") is None or eh.get("score") is None:
                     if e.get("status") in DEAD + ("STATUS_DELAYED",) and g.get("clk") != e.get("detail"):
@@ -411,19 +709,69 @@ def grade_docs(docs_by_slate, pre_old, feed, now, now_iso, pool_cache):
                         per = {"a": la, "h": lh}
                         if g.get("per") != per:
                             ch["per"] = per
+                    # props: actual values from the robot's box score, graded from the locked props
+                    props = g.get("props") or []
+                    gr = g.get("gr") or {}
+                    pv = list(g.get("pv") or [None] * len(props))
+                    pv += [None] * (len(props) - len(pv))
+                    pgr = list(gr.get("props") or [None] * len(props))
+                    pgr += [None] * (len(props) - len(pgr))
+                    players = None
+                    if props:
+                        bx = box(et_day(ko)).get(e["id"]) or box(et_day(A.when(e["date"]))).get(e["id"])
+                        players = (bx or {}).get("players")
+                    for i, p in enumerate(props):
+                        if i >= len(lprops):                  # added after the lock: shown, never graded
+                            pgr[i] = "X"
+                            continue
+                        lp = lprops[i]
+                        pl = A.find_player(lp.get("pl"), players) if players else None
+                        if pl:
+                            v = bb_stat(lp.get("mk"), pl)
+                            if v is not None:
+                                pv[i] = v
+                        if pgr[i] is None:
+                            pgr[i] = A.grade_ou(pv[i], lp.get("ln"), lp.get("side"))
+                        if pgr[i] is None and players and now - ko > A.VOID_AFTER:
+                            pgr[i] = "U"                     # not in the settled box score (did not play) or not gradable
+                            n["void"] += 1
+                        if pgr[i] is None:
+                            n["gaps"] += 1
+                    if props and pv != (g.get("pv") or []):
+                        ch["pv"] = pv
                     if g.get("tracked"):
                         su, lean, star = A.grade_game(gl, sc["a"], sc["h"])
-                        new_gr = {"su": su, "lean": lean, "star": star, "props": []}
-                        if (g.get("gr") or {}) != new_gr:
+                        new_gr = {"su": su, "lean": lean, "star": star, "props": pgr}
+                        if gr != new_gr:
                             ch["gr"] = new_gr
                             if not g.get("gr"):
                                 n["graded"] += 1
                             l = gl.get("lean") or {}
+                            cnt = {"W": 0, "L": 0, "P": 0, "U": 0}
+                            for r in pgr:
+                                if r in cnt:
+                                    cnt[r] += 1
                             row = {"lg": g["lg"], "su": su, "lean": lean, "star": star, "conf": l.get("conf"), "mk": l.get("mk"),
-                                   "props": {"W": 0, "L": 0, "P": 0, "U": 0}, "locked": bool(lock), "v": bool((lock or {}).get("v"))}
+                                   "props": cnt, "locked": bool(lock), "v": bool((lock or {}).get("v"))}
                             cv = ch.get("clv") or g.get("clv")
-                            if cv and cv.get("pts") is not None:
-                                row["clv"] = cv["pts"]
+                            if cv:
+                                if cv.get("pts") is not None:
+                                    row["clv"] = cv["pts"]
+                                if cv.get("p") is not None:
+                                    row["cp"] = cv["p"]
+                            if lock and lock.get("lm"):
+                                cl = e.get("close") or {}
+                                chm = cl.get("hm")
+                                if chm is not None and swapped:
+                                    chm = -chm
+                                mr = A.model_result(lock["lm"], chm, cl.get("tot"), sc)
+                                if mr:
+                                    row["lme"] = mr
+                            if lock and lock.get("pp"):
+                                rows = [[pp_, 1 if pgr[i] == "W" else 0, A.implied_from_text((lprops[i] if i < len(lprops) else {}).get("odds"))]
+                                        for i, pp_ in enumerate(lock["pp"]) if pp_ is not None and i < len(pgr) and pgr[i] in ("W", "L")]
+                                if rows:
+                                    row["pp"] = rows
                             results.setdefault(slate, {})[gid] = row
                 elif g.get("clk") != e.get("detail"):
                     ch["clk"] = e.get("detail")
@@ -520,7 +868,23 @@ def main(argv=None):
     ap.add_argument("--leagues", default="NBA,WNBA,MBB,WBB")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--grade-only", action="store_true")
+    ap.add_argument("--box", help="player box scores, box/bb (URL or dir); default: the robot's, when --feed is the robot's")
+    ap.add_argument("--model", help="Ledger Model results, bb_model.json (URL or path); default: the robot's")
+    ap.add_argument("--cm", help="Claude Model numbers, bb_cm.json (URL or path); default: the robot's")
     args = ap.parse_args(argv)
+    robot = args.feed == RAW
+    box_src = args.box or (f"{ROOT_URL}/box/bb" if robot else None)
+
+    def opt_load(src, name):
+        if not src:
+            return None
+        try:
+            return A.load(src)
+        except Exception as ex:
+            print(f"{name} unavailable: {ex}", file=sys.stderr)
+            return None
+    M = opt_load(args.model or (f"{ROOT_URL}/model/results/bb_model.json" if robot else None), "Ledger Model results")
+    CM = opt_load(args.cm or (f"{ROOT_URL}/model/results/bb_cm.json" if robot else None), "Claude Model numbers")
     now = A.when(args.now) if args.now else dt.datetime.now(UTC)
     now_iso = now.astimezone(UTC).isoformat(timespec="seconds")
     leagues = tuple(x for x in args.leagues.split(",") if x in LEAGUES)
@@ -551,7 +915,7 @@ def main(argv=None):
             f = write(args.out, "bbconfig.json", cfg2)
             manifest.append({"op": "set", "collection": "meta", "doc_id": "bbconfig", "file_path": f})
 
-    changes, pregame, results, n = grade_docs(lg_docs, pre_old, args.feed, now, now_iso, {})
+    changes, pregame, results, n = grade_docs(lg_docs, pre_old, args.feed, now, now_iso, {}, {"box": box_src, "M": M})
 
     # league docs: one write each, build and grading merged
     keys = set(changes) | {(args.slate, lg) for lg in built}
@@ -575,11 +939,32 @@ def main(argv=None):
             f = write(args.out, f"{slate}__{lg}.json", body)
             manifest.append({"op": "set", "collection": f"bbslates/{slate}/leagues", "doc_id": lg, "file_path": f})
 
+    gates = gates_of(M)
     for slate, pg in sorted(pregame.items()):
-        if not pg["games"] and not pg["snaps"]:
+        old = pre_old.get(slate) or {}
+        extra = {}
+        # price coverage of the day's tracked games (phase gate) and the model gates the page reads
+        tracked = priced = 0
+        all_ent = dict(old.get("games") or {})
+        all_ent.update(pg["games"])
+        for doc in (lg_docs.get(slate) or {}).values():
+            for gid, g in (doc.get("games") or {}).items():
+                if g.get("tracked"):
+                    tracked += 1
+                    en = all_ent.get(gid) or {}
+                    if en.get("close") or en.get("quotes"):
+                        priced += 1
+        cov = {"tracked": tracked, "priced": priced}
+        if cov != old.get("coverage"):
+            extra["coverage"] = cov
+        if gates and gates != old.get("gates"):
+            extra["gates"] = gates
+        if not pg["games"] and not pg["snaps"] and not pg.get("preds") and not extra:
             continue
         exists = slate in pre_old
-        body = {"slate": slate, "updatedAt": now_iso, "feedCheckedAt": status.get("checkedAt"), "games": pg["games"], "snaps": pg["snaps"]}
+        body = dict({"slate": slate, "updatedAt": now_iso, "feedCheckedAt": status.get("checkedAt"), "games": pg["games"], "snaps": pg["snaps"]}, **extra)
+        if pg.get("preds"):
+            body["preds"] = pg["preds"]
         f = write(args.out, f"{slate}__pregame.json", body)
         manifest.append({"op": "update" if exists else "set", "collection": "bbpregame", "doc_id": slate, "file_path": f})
 
@@ -594,6 +979,10 @@ def main(argv=None):
                     + (f" ({n['late']} back-filled)" if n["late"] else ""))
     if n["unmatched"]:
         bits.append(f"{len(n['unmatched'])} not found in the feed")
+    if n["gaps"]:
+        bits.append(f"{n['gaps']} prop{'s' if n['gaps'] != 1 else ''} waiting on box scores")
+    if n["void"]:
+        bits.append(f"{n['void']} prop{'s' if n['void'] != 1 else ''} unresolved (player or market not in the box score)")
     ck = status.get("checkedAt")
     if ck and (now - A.when(ck)).total_seconds() > 45 * 60:
         bits.append(f"basketball feed last checked {int((now - A.when(ck)).total_seconds() // 60)} min ago")
