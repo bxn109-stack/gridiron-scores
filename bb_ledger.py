@@ -330,16 +330,19 @@ def build_game(e, lg, old, ctx, now):
     fav, sp, tot, book = book_line(e)
     gid = old.get("id") if old else game_id(lg, e)
     c = ctx.get(gid) or ctx.get(e["id"]) or {}
-    model = [m for m in [bpi_entry(e, lg)] if m]
-    for x in c.get("model") or []:
-        if isinstance(x, dict) and x.get("src") and (x.get("fav") in ("A", "H") or isinstance(x.get("t"), (int, float))):
-            model.append({k: x.get(k) for k in ("src", "fav", "m", "p", "t") if x.get(k) is not None})
-    experts = [{k: x.get(k) for k in ("src", "pick", "side", "score") if x.get(k) is not None}
-               for x in c.get("experts") or [] if isinstance(x, dict) and x.get("src")]
-    if not experts and old:
-        experts = old.get("experts") or []
-    if len(model) == 1 and old:                       # keep researched projections from an earlier run today
-        model += [x for x in old.get("model") or [] if x.get("src") != model[0]["src"]]
+    # research merges by source: a later run's source replaces the same source from earlier today, the rest are kept
+    bpi = bpi_entry(e, lg)
+    new_m = [{k: x.get(k) for k in ("src", "fav", "m", "p", "t") if x.get(k) is not None} for x in c.get("model") or []
+             if isinstance(x, dict) and x.get("src") and (x.get("fav") in ("A", "H") or isinstance(x.get("t"), (int, float)))]
+    srcs = {x["src"] for x in new_m} | ({bpi["src"]} if bpi else set())
+    model = ([bpi] if bpi else []) + [x for x in (old or {}).get("model") or [] if x.get("src") not in srcs] + new_m
+    if not bpi and old:
+        model = [x for x in old.get("model") or [] if x.get("src") == "ESPN BPI" and x.get("src") not in {y["src"] for y in new_m}] + \
+                [x for x in model if x.get("src") != "ESPN BPI"]
+    new_x = [{k: x.get(k) for k in ("src", "pick", "side", "score") if x.get(k) is not None}
+             for x in c.get("experts") or [] if isinstance(x, dict) and x.get("src")]
+    xsrcs = {x["src"] for x in new_x}
+    experts = [x for x in (old or {}).get("experts") or [] if x.get("src") not in xsrcs] + new_x
     g = {
         "id": gid, "lg": lg, "eid": e["id"], "ko": A.when(e["date"]).astimezone(ET).isoformat(timespec="seconds"),
         "a": {"n": team_name(e["away"]), "r": e["away"].get("rank"), "rec": e["away"].get("rec")},
@@ -1190,9 +1193,11 @@ def read_docs(docs_dir):
     return lg_docs, pre, res, cfg
 
 
-def list_games(feed, slate, leagues, now):
+def list_games(feed, slate, leagues, now, board=None):
+    """Games with a spread for the date; with the day's board docs, also what research each game already has."""
     d = dt.date.fromisoformat(slate)
     rows = []
+    on_board = {g.get("eid"): g for doc in (board or {}).values() for g in (doc.get("games") or {}).values()}
     for e in (load_day(feed, d).get("games") or {}).values():
         if e.get("lg") not in leagues or e.get("status") in DEAD:
             continue
@@ -1205,8 +1210,13 @@ def list_games(feed, slate, leagues, now):
                      "away": team_name(e["away"]), "home": team_name(e["home"]),
                      "ranks": [e["away"].get("rank"), e["home"].get("rank")],
                      "line": f"{team_name(e['home'] if fav == 'H' else e['away'])} {fmt_ln(-sp)}", "tot": tot,
-                     "bpi": f"{bpi['fav']} {bpi['p']}%" if bpi else None, "started": ko - now <= LOCK_BEFORE})
-    rows.sort(key=lambda r: (LEAGUES.index(r["lg"]), r["tip"]))
+                     "bpi": f"{bpi['fav']} {bpi['p']}%" if bpi else None, "started": ko - now <= LOCK_BEFORE, "_ko": ko})
+        b = on_board.get(e["id"])
+        if b:
+            rows[-1].update({"id": b["id"], "proj": sum(1 for x in b.get("model") or [] if x.get("src") != "ESPN BPI"),
+                             "experts": len(b.get("experts") or []), "props": len(b.get("props") or []),
+                             "conf": (b.get("lean") or {}).get("conf"), "star": bool(b.get("star"))})
+    rows.sort(key=lambda r: (LEAGUES.index(r["lg"]), r.pop("_ko")))
     return rows
 
 
@@ -1242,7 +1252,8 @@ def main(argv=None):
     now_iso = now.astimezone(UTC).isoformat(timespec="seconds")
     leagues = tuple(x for x in args.leagues.split(",") if x in LEAGUES)
     if args.list:
-        for r in list_games(args.feed, args.slate, leagues, now):
+        board = read_docs(args.docs)[0].get(args.slate) if args.docs else None
+        for r in list_games(args.feed, args.slate, leagues, now, board):
             print(json.dumps(r))
         return
     os.makedirs(args.out, exist_ok=True)

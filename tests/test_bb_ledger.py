@@ -189,6 +189,14 @@ class Ledger(unittest.TestCase):
         g = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]
         self.assertEqual([x["src"] for x in g["model"]], ["ESPN BPI", "Dimers"])
         self.assertEqual(len(g["experts"]), 1)
+        # an afternoon refresh adds a new source and updates one: the morning's other research is kept
+        wj({"NBA-lakers-hawks": {"model": [{"src": "DRatings", "fav": "H", "m": 3.0, "t": 230.0}, {"src": "Dimers", "fav": "H", "m": 5.0}],
+                                 "experts": [{"src": "SI", "pick": "Hawks -1.5", "side": "H"}]}}, ctx)
+        self.apply(self.run_ledger("2026-11-10T20:45:00Z", extra=["--ctx", ctx]))
+        g = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]
+        self.assertEqual([(x["src"], x.get("m")) for x in g["model"]], [("ESPN BPI", g["model"][0]["m"]), ("DRatings", 3.0), ("Dimers", 5.0)])
+        self.assertEqual([x["src"] for x in g["experts"]], ["Covers", "SI"])
+        self.assertEqual(g["facts"], ["Lakers on the second night of a back-to-back (Covers)"])
 
     def test_markets_and_stats(self):
         p = {"pts": 28, "reb": 9, "ast": 4, "stl": 2, "blk": 1, "to": 3, "tpm": 3, "fgm": 10, "ftm": 5, "oreb": 2, "fp": 47.8}
