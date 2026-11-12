@@ -729,8 +729,12 @@ def main():
                     pg["snaps"][gid] = old_snaps + [dict(snap, at=now_iso, h=chain(old_snaps[-1].get("h") if old_snaps else None, snap, now_iso))]
             old_ent = (pg["_old"].get("games") or {}).get(gid) or {}
             if e and (e.get("quotes") or e.get("qopen") or e.get("qclose") or (args.pregame and ko > now and (M or P or S))):
-                ent = {"state": e.get("state"), "quotes": e.get("quotes") if e.get("state") == "pre" else None,
-                       "open": e.get("qopen"), "close": e.get("qclose")}
+                pre = e.get("state") == "pre"
+                # before kickoff the feed's qclose is a copy of quotes; storing both pushed a three-book slate past the
+                # database's 256 KB document cap, so close is left empty until the game starts (then it holds qclose)
+                ent = {"state": e.get("state"), "quotes": e.get("quotes") if pre else None,
+                       "open": e.get("qopen"),
+                       "close": None if pre and e.get("qclose") == e.get("quotes") else e.get("qclose")}
                 if swapped:
                     ent = {k: swap_quotes(v) if k != "state" else v for k, v in ent.items()}
                 if ko > now and (M or P or S):
