@@ -51,6 +51,9 @@ class Ledger(unittest.TestCase):
         self.docs = os.path.join(self.tmp.name, "docs")
         os.makedirs(self.feed)
         os.makedirs(self.docs)
+        self.bpi = os.path.join(self.tmp.name, "bb_bpi.json")
+        wj({"leagues": {lg: {"gap": 3, "sig": sig, "table": [{"gap": 3, "test": {"w": 60, "l": 40, "pct": 60.0}}]}
+                        for lg, sig in (("NBA", 11.0), ("MBB", 14.0), ("WBB", 15.0))}}, self.bpi)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -63,7 +66,7 @@ class Ledger(unittest.TestCase):
         out = os.path.join(self.tmp.name, "out", now.replace(":", ""))
         buf = io.StringIO()
         with redirect_stdout(buf), redirect_stderr(io.StringIO()):
-            B.main(["--docs", self.docs, "--out", out, "--feed", self.feed, "--now", now] + (["--slate", slate] if slate else []) + list(extra))
+            B.main(["--docs", self.docs, "--out", out, "--feed", self.feed, "--now", now, "--bpi", self.bpi] + (["--slate", slate] if slate else []) + list(extra))
         return json.loads(buf.getvalue())
 
     def apply(self, manifest):
@@ -86,22 +89,44 @@ class Ledger(unittest.TestCase):
     def doc(self, *parts):
         return rj(os.path.join(self.docs, *parts) + ".json")
 
-    def test_lean_method(self):
-        g = {"lg": "MBB", "a": {"n": "Army"}, "h": {"n": "Duke"}, "line": {"fav": "H", "sp": 20.0},
-             "model": [{"src": "x", "fav": "H", "m": 26.0}], "experts": []}
+    def test_lean_rule(self):
+        B.RULE.clear()
+        B.RULE.update({"MBB": {"gap": 3, "sig": 10.0, "rec": "60-40"}})
+        bpi = lambda m: {"src": "ESPN BPI", "fav": "H" if m >= 0 else "A", "m": abs(m)}
+        g = {"lg": "MBB", "a": {"n": "Army"}, "h": {"n": "Duke"}, "line": {"fav": "H", "sp": 20.0}, "model": [bpi(26.0)], "experts": []}
         l = B.lean_for(g)
-        self.assertEqual((l["side"], l["ln"], l["conf"]), ("H", -20.0, 1))      # projection beats the line: favorite
-        g["model"] = [{"src": "x", "fav": "H", "m": 14.0}]
-        l = B.lean_for(g)
-        self.assertEqual((l["side"], l["ln"]), ("A", 20.0))                     # dog gets the points
-        # conf 2 needs two projections, |score| >= 1.25 and experts agreeing
-        g["model"] = [{"src": "x", "fav": "H", "m": 26.0}, {"src": "y", "fav": "H", "m": 25.0}]
+        self.assertEqual((l["side"], l["ln"], l["conf"]), ("H", -20.0, 1))      # BPI 6 past the line: the favorite
+        self.assertIn("3-point gap that beat the closing line", l["why"])
+        g["model"] = [bpi(14.0)]
+        self.assertEqual((B.lean_for(g)["side"], B.lean_for(g)["ln"]), ("A", 20.0))   # the dog gets the points
+        g["model"] = [bpi(18.0)]
+        self.assertIsNone(B.lean_for(g))                                        # a 2-point gap: no lean
+        g["model"] = [{"src": "DRatings", "fav": "H", "m": 26.0}]
+        self.assertIsNone(B.lean_for(g))                                        # untested sources alone never lean
+        # other projections veto when they sit 1+ point on the other side of the line
+        g["model"] = [bpi(26.0), {"src": "DRatings", "fav": "H", "m": 18.0}]
+        lean, _, veto = B.spread_case(g)
+        self.assertIsNone(lean)
+        self.assertIn("DRatings", veto)
+        # agreeing projections past the gap plus agreeing experts: confidence 2
+        g["model"] = [bpi(26.0), {"src": "DRatings", "fav": "H", "m": 24.0}]
         g["experts"] = [{"src": "e", "side": "H"}]
         self.assertEqual(B.lean_for(g)["conf"], 2)
-        g["experts"] = [{"src": "e", "side": "A"}, {"src": "f", "side": "A"}]
-        self.assertEqual(B.lean_for(g)["conf"], 1)                              # projections and experts disagree
-        g["model"] = []
-        self.assertIsNone(B.lean_for(g))                                        # no projection, no lean
+        g["experts"] = [{"src": "e", "side": "A"}]
+        self.assertEqual(B.lean_for(g)["conf"], 1)
+        # a league with no tested gap posts no leans
+        B.RULE["MBB"]["gap"] = None
+        self.assertIsNone(B.lean_for(g))
+        B.RULE.clear()
+
+    def test_sources_rescaled_to_the_market(self):
+        # a source that runs at 70% of the market's margins is scaled up before it is compared with the line
+        games = [{"lg": "NBA", "line": {"fav": "H", "sp": sp, "tot": 220.0}, "model": [{"src": "DRatings", "fav": "H", "m": round(0.7 * sp, 2), "t": 227.0}]}
+                 for sp in (2.5, 4.5, 6.5, 8.5, 10.5, 12.5, 14.5, 16.5, 3.5, 5.5)]
+        cal = B.calibrate(games)[("NBA", "DRatings")]
+        self.assertEqual(cal["n"], 10)
+        self.assertAlmostEqual(cal["k"], 1 + (10 / 15) * (1 / 0.7 - 1), places=2)   # shrunk toward 1 for 10 games
+        self.assertAlmostEqual(cal["b"], 7.0 * 10 / 15, places=2)                   # totals run 7 high
 
     def test_build_lock_grade_cycle(self):
         tip = "2026-11-11T00:00Z"                                               # 7 PM ET Nov 10
@@ -125,6 +150,10 @@ class Ledger(unittest.TestCase):
         self.assertEqual(len(pg["snaps"]["MBB-army-duke"]), 1)
         self.assertNotIn("why", json.dumps(pg["snaps"]))                       # compact pick history
         first = g["lean"]
+        self.assertEqual((first["side"], first["ln"]), ("H", -24.5))            # BPI Duke by 28.8: 4.3 past the line
+        self.assertAlmostEqual(g["bpi"]["e"], 4.25, places=1)
+        nba0 = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]
+        self.assertIsNone(nba0["lean"])                                         # BPI within 1 point of the line: no lean
 
         # line moves before tip: lean recomputed, marked Updated, pick history grows
         pre[0] = fgame("9", "MBB", tip, "Army", "Duke", hl=-30.5, tot=141.5, hp=98.0)
@@ -132,10 +161,8 @@ class Ledger(unittest.TestCase):
         self.apply(self.run_ledger("2026-11-10T22:00:00Z"))
         g = self.doc("bbslates/2026-11-10/leagues", "MBB")["games"]["MBB-army-duke"]
         self.assertEqual(g["line"]["sp"], 30.5)
-        if g["lean"]["ln"] != first["ln"]:
-            self.assertTrue(g["lean"]["why"].startswith("Updated "))
+        self.assertIsNone(g["lean"])                                            # the gap closed: the lean is withdrawn
         self.assertEqual(len(self.doc("bbpregame", "2026-11-10")["snaps"]["MBB-army-duke"]), 2)
-        locked_lean = g["lean"]
 
         # inside 15 minutes of tip a build changes nothing
         pre[0] = fgame("9", "MBB", tip, "Army", "Duke", hl=-10.5, tot=141.5, hp=98.0)
@@ -151,22 +178,26 @@ class Ledger(unittest.TestCase):
         g = self.doc("bbslates/2026-11-10/leagues", "MBB")["games"]["MBB-army-duke"]
         self.assertEqual(g["st"], "live")
         self.assertTrue(g["lock"]["v"])
-        self.assertEqual(g["lock"]["lean"]["ln"], locked_lean["ln"])
+        self.assertIsNone(g["lock"]["lean"])
         self.put_feed("2026-11-10", [fgame("9", "MBB", tip, "Army", "Duke", hl=-30.5, tot=141.5, state="post", sa=55, sh=80, lines=([25, 30], [40, 40])),
                                      fgame("7", "NBA", tip, "Lakers", "Hawks", hl=-1.5, tot=236.5, state="post", sa=110, sh=112)])
         self.apply(self.run_ledger("2026-11-11T03:00:00Z", slate=None))
         g = self.doc("bbslates/2026-11-10/leagues", "MBB")["games"]["MBB-army-duke"]
         self.assertEqual((g["st"], g["sc"]), ("final", {"a": 55, "h": 80}))
         self.assertEqual(g["per"], {"a": [25, 30], "h": [40, 40]})
-        side = locked_lean["side"]
-        self.assertEqual(g["gr"]["lean"], "L" if side == "H" else "W")            # Duke won by 25 < 30.5
+        self.assertIsNone(g["gr"]["lean"])                                      # no lean, nothing graded against the line
         self.assertEqual(g["gr"]["su"], "W")
         res = self.doc("bbresults", "2026-11-10")
         self.assertEqual(res["games"]["MBB-army-duke"]["lg"], "MBB")
         self.assertTrue(res["games"]["MBB-army-duke"]["v"])
+        # background record: BPI liked Army (+1.75 short of the 30.5 line) and Duke won by 25: BPI's side covered
+        e, r, gap = res["games"]["MBB-army-duke"]["bpi"]
+        self.assertEqual(gap, 3)
+        self.assertLess(e, 0)
+        self.assertEqual(r, "W")
         nba = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]
         self.assertEqual(nba["gr"]["su"], "W")                                    # Hawks (favorite) won by 2
-        self.assertEqual(nba["gr"]["lean"], "W" if nba["lock"]["lean"]["side"] == "H" else "L")
+        self.assertIsNone(nba["gr"]["lean"])
         live = self.doc("meta", "bblive")
         self.assertEqual(live["graded"], 2)
         # a further run changes nothing for finished games
@@ -182,7 +213,7 @@ class Ledger(unittest.TestCase):
         self.apply(self.run_ledger("2026-11-10T16:00:00Z", extra=["--ctx", ctx]))
         g = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]
         self.assertEqual([x["src"] for x in g["model"]], ["ESPN BPI", "Dimers"])
-        self.assertEqual(g["lean"]["side"], "H")
+        self.assertIsNone(g["lean"])                                            # Dimers alone cannot make a lean
         self.assertEqual(g["facts"], ["Lakers on the second night of a back-to-back (Covers)"])
         # a later run without research keeps what was found
         self.apply(self.run_ledger("2026-11-10T22:00:00Z"))
@@ -252,27 +283,27 @@ class Ledger(unittest.TestCase):
         self.assertEqual(g["gr"]["props"], ["W", "W", "U", "X"])
         self.assertEqual(self.doc("bbresults", "2026-11-10")["games"]["NBA-lakers-hawks"]["props"], {"W": 2, "L": 0, "P": 0, "U": 1})
 
-    def test_total_lean_and_star(self):
+    def test_no_total_leans_and_spread_star(self):
         tip = "2026-11-11T00:00Z"
-        g = fgame("7", "NBA", tip, "Lakers", "Hawks", hl=-1.5, tot=226.5, hp=50.5)
-        g["qopen"] = {"DraftKings": {"book": "DraftKings", "spread": {"A": [3.5, -110], "H": [-3.5, -110]}, "total": {"O": [222.5, -110], "U": [222.5, -110]}}}
+        g = fgame("7", "NBA", tip, "Lakers", "Hawks", hl=-1.5, tot=226.5, hp=70.0)
+        g["qopen"] = {"DraftKings": {"book": "DraftKings", "spread": {"A": [0.5, -110], "H": [-0.5, -110]}, "total": {"O": [222.5, -110], "U": [222.5, -110]}}}
         self.put_feed("2026-11-10", [g])
         ctx = os.path.join(self.tmp.name, "ctx.json")
-        # spread case weak (BPI near a pick'em vs Hawks -1.5); totals: three projections well over and two Over picks
-        wj({"NBA-lakers-hawks": {"model": [{"src": "DRatings", "t": 236.0}, {"src": "Dimers", "fav": "H", "m": 1.0, "t": 234.0}],
-                                 "experts": [{"src": "Covers", "pick": "Over 226.5", "side": "O"}, {"src": "SI", "pick": "Over 226.5", "side": "O"}]}}, ctx)
+        # BPI Hawks by 5.8 against Hawks -1.5 (4.3 past the line); DRatings agrees; totals well over with two Over picks
+        wj({"NBA-lakers-hawks": {"model": [{"src": "DRatings", "fav": "H", "m": 6.0, "t": 236.0}],
+                                 "experts": [{"src": "Covers", "pick": "Hawks -1.5", "side": "H"}, {"src": "SI", "pick": "Over 226.5", "side": "O"}]}}, ctx)
         self.apply(self.run_ledger("2026-11-10T16:00:00Z", extra=["--ctx", ctx]))
         g = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]
-        self.assertEqual((g["lean"]["mk"], g["lean"]["side"], g["lean"]["ln"], g["lean"]["conf"]), ("total", "O", 226.5, 2))
-        # the total rose 4 points since it opened, toward the Over: a market signal, so the lean is a star
+        self.assertEqual((g["lean"]["mk"], g["lean"]["side"], g["lean"]["ln"], g["lean"]["conf"]), ("spread", "H", -1.5, 2))
+        # the spread moved a point toward the Hawks since it opened: a market signal, so the lean is a star
         self.assertTrue(g["star"])
-        self.assertIn("moved 4 toward the Over", g["starWhy"])
+        self.assertIn("moved 1 toward Hawks", g["starWhy"])
 
     def test_star_cap_per_day(self):
         tip = "2026-11-11T00:00Z"
         games, ctx = [], {}
         for i in range(5):
-            g = fgame(str(i), "MBB", tip, f"Away{i}", f"Home{i}", hl=-5.5, tot=140.5, hp=60.0)
+            g = fgame(str(i), "MBB", tip, f"Away{i}", f"Home{i}", hl=-5.5, tot=140.5, hp=80.0 + 3 * i)
             games.append(g)
             ctx[f"MBB-away{i}-home{i}"] = {"model": [{"src": "T-Rank", "fav": "H", "m": 12.0 + i}, {"src": "KenPom", "fav": "H", "m": 11.0 + i}],
                                            "experts": [{"src": "Covers", "side": "H", "pick": f"Home{i} -5.5"}],

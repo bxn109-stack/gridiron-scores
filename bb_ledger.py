@@ -61,6 +61,18 @@ WORST_PRICE = -115                              # a star's price must be at leas
 # DraftKings spreads against ESPN BPI chances on Nov 9-10, 2026 (MBB 39 games -> 14.1, NBA 9 -> 10.8, WBB 2 -> 16.1),
 # so BPI margins sit on the market's scale on average and the leans are not tilted toward underdogs by the conversion.
 SIG = {"NBA": 11.0, "WNBA": 11.0, "MBB": 14.0, "WBB": 15.0}
+# THE LEAN RULE (Nov 11, 2026). Posting a lean on every game went 45-67: most games had no real gap between the
+# projections and the line, and research sources on their own scales (DRatings ran about 26% short of the market's
+# margins and 7 points high on totals) pulled leans toward underdogs. Now a lean is posted only when ESPN BPI, the one
+# source with a historical test (model/bb_bpi.py, results in model/results/bb_bpi.json), differs from the line by at
+# least the gap that beat the closing line on both its tuning and test sets. Other projections are rescaled to the
+# market each day and can only veto a lean (or, agreeing with experts, raise it to confidence 2). With no passing gap
+# for a league, no leans are posted there. Every game still records BPI's gap ("bpi") for the background record.
+BPI_SRC = "ESPN BPI"
+CAL_MIN = 5            # games a source needs on a day before its own market scale is trusted fully (shrunk toward 1)
+VETO = 1.0             # other projections this far (points) on the other side of the line veto a lean
+RULE = {}              # {lg: {"gap": points or None, "sig": BPI margin scale, "rec": "test record at the gap"}}
+TOTAL_LEANS = False    # totals are not tested yet: no total leans
 LOCK_BEFORE = dt.timedelta(minutes=15)
 DEAD = ("STATUS_POSTPONED", "STATUS_CANCELED")
 
@@ -170,38 +182,117 @@ def home_margin(x, sig):
     return float(m) if fav == "H" else -float(m)
 
 
-def spread_case(g):
-    """(lean, score) on the spread, or (None, 0)."""
+def load_rule(res):
+    """{lg: {gap, sig, rec}} from model/results/bb_bpi.json. A league without a passing gap gets gap None (no leans)."""
+    out = {}
+    for lg, r in ((res or {}).get("leagues") or {}).items():
+        gap, rec = r.get("gap"), None
+        for row in r.get("table") or []:
+            if gap is not None and row.get("gap") == gap:
+                t = row.get("test") or {}
+                rec = f"{t.get('w')}-{t.get('l')}, {t.get('pct')}% on test games"
+        out[lg] = {"gap": gap, "sig": r.get("sig"), "rec": rec}
+    return out
+
+
+def bpi_sig(lg):
+    return (RULE.get(lg) or {}).get("sig") or SIG.get(lg, 11.0)
+
+
+def line_hm(g):
     line = g.get("line") or {}
     sp, fav = line.get("sp"), line.get("fav")
     if sp is None or fav not in ("A", "H"):
-        return None, 0.0
+        return None
+    return sp if fav == "H" else -sp
+
+
+def bpi_gap(g):
+    """BPI's projected home margin (on the tested scale) minus the line's, in points (+ = BPI likes the home side more
+    than the line does), or None."""
+    lhm = line_hm(g)
+    x = next((m for m in g.get("model") or [] if m.get("src") == BPI_SRC), None)
+    if lhm is None or not x:
+        return None
+    hm = home_margin({"fav": x.get("fav"), "p": x["p"]} if x.get("p") is not None else x, bpi_sig(g["lg"]))
+    return None if hm is None else round(hm - lhm, 2)
+
+
+def calibrate(games):
+    """Per league and source (BPI excepted: it uses its tested scale), the scale that maps the source's projected home
+    margins onto the day's lines, and its average total minus the posted totals, both shrunk toward no change when the
+    source covers few games. {(lg, src): {"k", "b", "n"}}"""
+    acc = {}
+    for g in games:
+        lhm = line_hm(g)
+        tot = (g.get("line") or {}).get("tot")
+        for x in g.get("model") or []:
+            src = x.get("src")
+            if not src or src == BPI_SRC:
+                continue
+            a = acc.setdefault((g["lg"], src), {"mm": 0.0, "ml": 0.0, "n": 0, "tb": 0.0, "tn": 0})
+            m = home_margin(x, SIG.get(g["lg"], 11.0))
+            if m is not None and lhm is not None:
+                a["mm"] += m * m
+                a["ml"] += m * lhm
+                a["n"] += 1
+            if isinstance(x.get("t"), (int, float)) and tot is not None:
+                a["tb"] += x["t"] - tot
+                a["tn"] += 1
+    cal = {}
+    for key, a in acc.items():
+        k = 1.0
+        if a["n"] and a["mm"] > 0:
+            w = a["n"] / (a["n"] + CAL_MIN)
+            k = w * clamp(a["ml"] / a["mm"], 0.6, 1.8) + (1 - w)
+        b = (a["tb"] / a["tn"]) * (a["tn"] / (a["tn"] + CAL_MIN)) if a["tn"] else 0.0
+        cal[key] = {"k": round(k, 3), "b": round(b, 2), "n": a["n"]}
+    return cal
+
+
+def spread_case(g, cal=None):
+    """(lean, score, veto) on the spread under THE LEAN RULE; lean None when BPI's gap is under the tested gap, when the
+    league has no tested gap, or when other projections veto it (veto names them)."""
+    lhm = line_hm(g)
+    e = bpi_gap(g)
+    rule = RULE.get(g["lg"]) or {}
+    G = rule.get("gap")
+    if lhm is None or e is None or G is None or abs(e) < G or e == 0:
+        return None, 0.0, None
+    line = g["line"]
+    sp, fav = line["sp"], line["fav"]
+    names = {"A": g["a"]["n"], "H": g["h"]["n"]}
+    side = "H" if e > 0 else "A"
+    bhm = e + lhm
     sig = SIG.get(g["lg"], 11.0)
-    projs = [(x.get("src"), home_margin(x, sig)) for x in g.get("model") or []]
-    projs = [(s, v) for s, v in projs if v is not None]
-    if not projs:
-        return None, 0.0
-    line_hm = sp if fav == "H" else -sp
-    avg = statistics.mean(v for _, v in projs)
-    diff = avg - line_hm
+    others = []
+    for x in g.get("model") or []:
+        if x.get("src") == BPI_SRC:
+            continue
+        m = home_margin(x, sig)
+        if m is not None:
+            k = ((cal or {}).get((g["lg"], x.get("src"))) or {}).get("k", 1.0)
+            others.append((x["src"], k * m))
+    ln = 0.0 if sp == 0 else (-sp if side == fav else sp)
+    why = (f"ESPN BPI has {names['H' if bhm >= 0 else 'A']} by {abs(bhm):.1f} against a line of {names[fav]} {fmt_ln(-sp)}: "
+           f"a {abs(e):.1f}-point gap toward {names[side]}, past the {G:g}-point gap that beat the closing line in testing"
+           + (f" ({rule['rec']})" if rule.get("rec") else "") + ".")
+    agree = False
+    if others:
+        oavg = statistics.mean(v for _, v in others)
+        od = oavg - lhm
+        srcs = ", ".join(s for s, _ in others)
+        if od * e < 0 and abs(od) >= VETO:
+            return None, 0.0, f"{srcs} (scaled to the market) put {names['H' if od > 0 else 'A']} {abs(od):.1f} points better than the line"
+        agree = od * e > 0 and abs(od) >= G
+        why += (f" Other projections ({srcs}, scaled to the market) average {names['H' if oavg >= 0 else 'A']} by {abs(oavg):.1f}"
+                + (", agreeing." if od * e > 0 else ", close to the line."))
     xs = [x for x in g.get("experts") or [] if x.get("side") in ("A", "H")]
     votes = sum(1 if x["side"] == "H" else -1 for x in xs)
-    score = clamp(diff / 3, -1.5, 1.5) + clamp(0.5 * votes, -1, 1)
-    side = "H" if score > 0 else "A"
-    conf = 1
-    if abs(score) >= 1.25 and votes and (diff > 0) == (votes > 0) and len(projs) >= 2:
-        conf = 2
-    ln = 0.0 if sp == 0 else (-sp if side == fav else sp)
-    names = {"A": g["a"]["n"], "H": g["h"]["n"]}
-    pf = "H" if avg >= 0 else "A"
-    n = len(projs)
-    why = (f"Projections ({n}) average {names[pf]} by {abs(avg):.1f}" if n > 1 else f"Projections (1) from {projs[0][0]} have {names[pf]} by {abs(avg):.1f}")
-    why += f" against a line of {names[fav]} {fmt_ln(-sp)}, so the value side is {names[side]} {fmt_ln(ln)}."
     if votes:
         why += f" Expert picks: net {abs(votes)} toward {names['H' if votes > 0 else 'A']}."
-    elif xs:
-        why += " Expert picks: net even."
-    return {"mk": "spread", "side": side, "ln": ln, "conf": conf, "why": why}, score
+    conf = 2 if agree and votes and (votes > 0) == (e > 0) else 1
+    return {"mk": "spread", "side": side, "ln": ln, "conf": conf, "why": why}, e / 3, None
 
 
 def total_case(g):
@@ -225,18 +316,19 @@ def total_case(g):
     return {"mk": "total", "side": side, "ln": float(tot), "conf": conf, "why": why}, score
 
 
-def lean_eval(g):
-    """The LEAN METHOD: the spread lean, unless the total case clearly favors the total (a confidence-2 total case,
-    a confidence-1 spread case and a bigger score). Returns (lean, score)."""
-    sl, ss = spread_case(g)
-    tl, ts = total_case(g)
-    if tl and tl["conf"] == 2 and (not sl or (sl["conf"] == 1 and abs(ts) > abs(ss))):
-        return tl, ts
+def lean_eval(g, cal=None):
+    """THE LEAN RULE (see the constants): a spread lean only past BPI's tested gap. Totals stay off until tested
+    (TOTAL_LEANS). Returns (lean, score)."""
+    sl, ss, _ = spread_case(g, cal)
+    if TOTAL_LEANS:
+        tl, ts = total_case(g)
+        if tl and tl["conf"] == 2 and (not sl or (sl["conf"] == 1 and abs(ts) > abs(ss))):
+            return tl, ts
     return sl, ss
 
 
-def lean_for(g):
-    return lean_eval(g)[0]
+def lean_for(g, cal=None):
+    return lean_eval(g, cal)[0]
 
 
 def side_quote(e, lean, swapped=False):
@@ -291,7 +383,7 @@ def bpi_entry(e, lg):
         return None
     fav = "H" if hp >= 50 else "A"
     pw = hp if fav == "H" else 100 - hp
-    return {"src": p.get("src") or "ESPN BPI", "fav": fav, "m": round(SIG.get(lg, 11.0) * inv_phi(pw / 100), 1), "p": round(pw, 1)}
+    return {"src": p.get("src") or BPI_SRC, "fav": fav, "m": round(bpi_sig(lg) * inv_phi(pw / 100), 1), "p": round(pw, 1)}
 
 
 def describe(e, lg):
@@ -361,16 +453,26 @@ def build_game(e, lg, old, ctx, now):
         g["out"] = [str(x) for x in (c.get("out") or (old or {}).get("out"))][:20]
     if c.get("signal") or (old or {}).get("signal"):
         g["signal"] = str(c.get("signal") or old.get("signal"))[:300]
-    lean, score = lean_eval(g)
-    if old and old.get("lean") and lean and (old["lean"].get("mk"), old["lean"].get("side"), old["lean"].get("ln")) != (lean["mk"], lean["side"], lean["ln"]):
+    return g
+
+
+def finalize_lean(g, e, old, now, cal):
+    """The lean (THE LEAN RULE, with the day's market scales), BPI's gap for the background record, and the star case."""
+    lean, score = lean_eval(g, cal)
+    _, _, veto = spread_case(g, cal)
+    gap = bpi_gap(g)
+    g["bpi"] = {"e": gap, "gap": (RULE.get(g["lg"]) or {}).get("gap")} if gap is not None else None
+    if veto and g["bpi"]:
+        g["bpi"]["veto"] = veto
+    old_lean = (old or {}).get("lean")
+    if old_lean and lean and (old_lean.get("mk"), old_lean.get("side"), old_lean.get("ln")) != (lean["mk"], lean["side"], lean["ln"]):
         lean["why"] = f"Updated {now.astimezone(ET).strftime('%a %-I:%M %p')}: " + lean["why"]
-    elif old and old.get("lean") and lean and old["lean"].get("why", "").startswith("Updated ") and \
-            (old["lean"].get("mk"), old["lean"].get("side"), old["lean"].get("ln")) == (lean["mk"], lean["side"], lean["ln"]):
-        lean["why"] = old["lean"]["why"].split(": ", 1)[0] + ": " + lean["why"]
+    elif old_lean and lean and old_lean.get("why", "").startswith("Updated ") and \
+            (old_lean.get("mk"), old_lean.get("side"), old_lean.get("ln")) == (lean["mk"], lean["side"], lean["ln"]):
+        lean["why"] = old_lean["why"].split(": ", 1)[0] + ": " + lean["why"]
     g["lean"] = lean
     g["_score"] = score
     g["_star"] = star_case(g, e, score, g.get("signal"))
-    return g
 
 
 def assign_stars(slate, built, docs, now):
@@ -420,7 +522,7 @@ def build(slate, feed_day, docs, ctx, now, leagues, CMd=None, cm_rows=None):
         if sp is None and old:
             g["line"] = old.get("line")
             g["lean"] = old.get("lean")
-            g["_star"] = g["_star"] if old.get("star") else None
+            g["_keep_lean"] = True
         keep = ("lock", "lockdiff", "clv", "pv", "per", "cm", "cmgr", "cmpv", "cmpa")
         for k in keep:
             if old and k in old:
@@ -439,10 +541,18 @@ def build(slate, feed_day, docs, ctx, now, leagues, CMd=None, cm_rows=None):
                 g["cm"] = card
                 if cm_rows is not None:
                     cm_rows.setdefault(lg, {})[old["id"] if old else g["id"]] = {"rows": rows}
-        full.setdefault(lg, {})[old["id"] if old else g["id"]] = (g, old)
-    assign_stars(slate, {lg: {gid: g for gid, (g, _) in gs.items()} for lg, gs in full.items()}, docs, now)
+        full.setdefault(lg, {})[old["id"] if old else g["id"]] = (g, old, e)
+    cal = calibrate([g for gs in full.values() for g, _, _ in gs.values()])
+    for gs in full.values():
+        for g, old, e in gs.values():
+            if g.pop("_keep_lean", False):
+                g["bpi"] = (old or {}).get("bpi")
+                g["_score"], g["_star"] = 0.0, None
+            else:
+                finalize_lean(g, e, old, now, cal)
+    assign_stars(slate, {lg: {gid: g for gid, (g, _, _) in gs.items()} for lg, gs in full.items()}, docs, now)
     for lg, gs in full.items():
-        for gid, (g, old) in gs.items():
+        for gid, (g, old, _) in gs.items():
             if old:
                 changed = {k: v for k, v in g.items() if old.get(k) != v}
                 if changed:
@@ -1099,6 +1209,11 @@ def grade_docs(docs_by_slate, pre_old, feed, now, now_iso, pool_cache, opts=None
                                     cnt[r] += 1
                             row = {"lg": g["lg"], "su": su, "lean": lean, "star": star, "conf": l.get("conf"), "mk": l.get("mk"),
                                    "props": cnt, "locked": bool(lock), "v": bool((lock or {}).get("v"))}
+                            bp = g.get("bpi") or {}
+                            lh = line_hm(gl)
+                            if bp.get("e") and lh is not None:      # background record: BPI's side, every game
+                                cov = (sc["h"] - sc["a"]) - lh
+                                row["bpi"] = [bp["e"], "P" if cov == 0 else ("W" if (cov > 0) == (bp["e"] > 0) else "L"), bp.get("gap")]
                             cv = ch.get("clv") or g.get("clv")
                             if cv:
                                 if cv.get("pts") is not None:
@@ -1206,7 +1321,12 @@ def list_games(feed, slate, leagues, now, board=None):
             continue
         ko = A.when(e["date"])
         bpi = bpi_entry(e, e["lg"])
+        gap = bpi_gap({"lg": e["lg"], "line": {"fav": fav, "sp": sp}, "model": [bpi] if bpi else []})
+        G = (RULE.get(e["lg"]) or {}).get("gap")
+        side = team_name(e["home"] if (gap or 0) > 0 else e["away"])
         rows.append({"id": game_id(e["lg"], e), "lg": e["lg"], "tip": ko.astimezone(ET).strftime("%-I:%M %p"),
+                     "bpi_gap": f"{abs(gap):.1f} toward {side}" if gap else None,
+                     "candidate": bool(G is not None and gap is not None and abs(gap) >= G - 1),
                      "away": team_name(e["away"]), "home": team_name(e["home"]),
                      "ranks": [e["away"].get("rank"), e["home"].get("rank")],
                      "line": f"{team_name(e['home'] if fav == 'H' else e['away'])} {fmt_ln(-sp)}", "tot": tot,
@@ -1234,6 +1354,7 @@ def main(argv=None):
     ap.add_argument("--box", help="player box scores, box/bb (URL or dir); default: the robot's, when --feed is the robot's")
     ap.add_argument("--model", help="Ledger Model results, bb_model.json (URL or path); default: the robot's")
     ap.add_argument("--cm", help="Claude Model numbers, bb_cm.json (URL or path); default: the robot's")
+    ap.add_argument("--bpi", help="BPI backtest results, bb_bpi.json (URL or path): sets THE LEAN RULE's gaps; default: the robot's")
     args = ap.parse_args(argv)
     robot = args.feed == RAW
     box_src = args.box or (f"{ROOT_URL}/box/bb" if robot else None)
@@ -1248,6 +1369,8 @@ def main(argv=None):
             return None
     M = opt_load(args.model or (f"{ROOT_URL}/model/results/bb_model.json" if robot else None), "Ledger Model results")
     CM = opt_load(args.cm or (f"{ROOT_URL}/model/results/bb_cm.json" if robot else None), "Claude Model numbers")
+    RULE.clear()
+    RULE.update(load_rule(opt_load(args.bpi or (f"{ROOT_URL}/model/results/bb_bpi.json" if robot else None), "BPI test results")))
     now = A.when(args.now) if args.now else dt.datetime.now(UTC)
     now_iso = now.astimezone(UTC).isoformat(timespec="seconds")
     leagues = tuple(x for x in args.leagues.split(",") if x in LEAGUES)
@@ -1272,6 +1395,10 @@ def main(argv=None):
             for gid, ch in games.items():
                 doc["games"][gid] = dict(doc["games"].get(gid) or {}, **ch)
         notes.append(f"board {args.slate}: {sum(len(v) for v in built.values())} game(s) written ({n_new} new)")
+        day_games = [g for doc in (lg_docs.get(args.slate) or {}).values() for g in (doc.get("games") or {}).values()]
+        n_lean = sum(1 for g in day_games if g.get("lean"))
+        gaps = ", ".join(f"{lg} {r['gap']:g}+" for lg, r in sorted(RULE.items()) if r.get("gap") is not None)
+        notes.append(f"{n_lean} lean(s) past BPI's tested gap ({gaps})" if gaps else "no league has a tested BPI gap yet, so no leans")
         active = list((cfg or {}).get("leagues") or ["NBA", "MBB", "WBB"])
         active += [lg for lg in LEAGUES if lg in built and lg not in active]
         cfg2, changed = config_update(cfg, args.slate, sorted(active, key=LEAGUES.index), now_iso)
