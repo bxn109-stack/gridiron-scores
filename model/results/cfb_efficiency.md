@@ -1,6 +1,6 @@
 # College football efficiency model backtest
 
-Updated 2026-11-12 02:53 UTC. Walk-forward ratings from garbage-time-free advanced stats (points added per play, success rate, pace), plus recruiting talent and returning production early in the season. Blend weights fitted on 2014–2019 only; scored on 2021–2025.
+Updated 2026-11-12 04:20 UTC. Walk-forward ratings from garbage-time-free advanced stats (points added per play, success rate, pace), plus recruiting talent and returning production early in the season. Blend weights fitted on 2014–2019 only; scored on 2021–2025.
 
 ## Data check
 
@@ -115,4 +115,4 @@ Betting the opening number and watching it close in your direction (beating the 
 | 6+ pts | 628–561 (52.8%, ROI +0.8%) | 327–315 (50.9%, ROI -2.8%) |
 | 8+ pts | 234–245 (48.9%, ROI -6.7%) | 113–121 (48.3%, ROI -7.8%) |
 
-Break-even at −110 is 52.4%. Small groups (under ~200 bets) swing a lot by chance. Run time 14 s.
+Break-even at −110 is 52.4%. Small groups (under ~200 bets) swing a lot by chance. Run time 16 s.
