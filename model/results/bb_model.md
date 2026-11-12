@@ -1,6 +1,6 @@
 # Basketball Ledger Model
 
-Updated 2026-11-11T20:32Z. The football Ledger Model's engine on basketball: walk-forward points ratings; settings tuned on early seasons, scored on later seasons never seen while tuning, against ESPN's closing lines. Break-even at −110 is 52.4%.
+Updated 2026-11-12T03:40Z. The football Ledger Model's engine on basketball: walk-forward points ratings; settings tuned on early seasons, scored on later seasons never seen while tuning, against ESPN's closing lines. Break-even at −110 is 52.4%.
 
 ## NBA
 
