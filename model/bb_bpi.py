@@ -8,8 +8,10 @@ spread" at a range of minimum gaps between BPI and the line.
 
 Fair test: the margin scale (SIG) and the gap are chosen on a tuning set and scored on a test set the choice never
 saw. NBA tunes on 2022-23 and tests on 2025-26; college (one season with closing lines) tunes on games before Jan 15
-and tests on the rest. A gap passes only if it beats the break-even rate at -110 (52.4%) on both sets with at least
-100 test games; the smallest passing gap is the rule. If none passes, the lean rule stays off for that league.
+and tests on the rest. A gap passes only if it beats the break-even rate at -110 (52.4%) on both sets, with at least
+100 test games and the test rate at least one standard error above break-even (Nov 12, 2026: the first run had
+women's college "passing" at a 1-point gap with 52.5% on test games, which is break-even, not an edge). The smallest
+passing gap is the rule. If none passes, the lean rule stays off for that league.
 
 Runs on GitHub Actions ("Basketball BPI test" workflow); standard library only.
   python3 model/bb_bpi.py [--max-requests N] [--leagues NBA,MBB,WBB] [--analyze-only]
@@ -34,6 +36,7 @@ DATA = os.path.join(ROOT, "data", "bb")
 OUT = os.path.join(ROOT, "model", "results")
 BREAK_EVEN = 52.38
 MIN_TEST = 100
+Z_MIN = 1.0      # the test-set rate must sit at least one standard error above break-even, not just touch it
 GAPS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12]
 # (league, tuning seasons, test seasons, split date for single-season college tests)
 PLAN = {
@@ -125,6 +128,11 @@ def fit_sig(rows):
     return sum(r["z"] * r["hm"] for r in rows) / zz if zz else None
 
 
+def z_over_break_even(rec):
+    n = rec["w"] + rec["l"]
+    return (rec["w"] / n - BREAK_EVEN / 100) / math.sqrt(0.25 / n) if n else None
+
+
 def grade(rows, sig, gap):
     w = l = p = 0
     for r in rows:
@@ -165,7 +173,9 @@ def analyze(lg, rows_by_season):
     passing = None
     for gap in GAPS:
         t, s, e = grade(tune, sig, gap), grade(test, sig, gap), grade(early, sig, gap)
-        ok = (t["pct"] or 0) >= BREAK_EVEN and (s["pct"] or 0) >= BREAK_EVEN and (s["w"] + s["l"]) >= MIN_TEST
+        zb = z_over_break_even(s)
+        ok = (t["pct"] or 0) >= BREAK_EVEN and (s["pct"] or 0) >= BREAK_EVEN and (s["w"] + s["l"]) >= MIN_TEST and (zb or 0) >= Z_MIN
+        s["zbe"] = round(zb, 2) if zb is not None else None
         table.append({"gap": gap, "tune": t, "test": s, "early": e, "pass": ok})
         if ok and passing is None and gap > 0:
             passing = gap
@@ -184,7 +194,9 @@ def write_report(results, used):
     md = [f"# Basketball: ESPN BPI against the closing line\n",
           f"Updated {now}. Take the side ESPN's BPI likes against the closing spread when BPI's projected margin differs "
           f"from the line by at least the gap. The margin scale and gap are chosen on the tuning set and scored on a test "
-          f"set they never saw; a gap passes only at {BREAK_EVEN}%+ (break-even at -110) on both, with {MIN_TEST}+ test games. "
+          f"set they never saw; a gap passes only at {BREAK_EVEN}%+ (break-even at -110) on both, with {MIN_TEST}+ test games "
+          f"and the test rate at least {Z_MIN:g} standard error above break-even (z over break-even in the Test column). Many gaps "
+          f"and three leagues are tried, so a pass is a candidate rule that the live background record must confirm. "
           f"Requests this run: {used}.\n"]
     for lg, r in results.items():
         md.append(f"## {lg}\n")
@@ -192,10 +204,11 @@ def write_report(results, used):
                   f"({r['n_early']} in October-November). " + (f"Margin scale {r['sig']}. " if r.get("sig") else "")
                   + f"**{r['note']}**.\n")
         if r.get("table"):
-            md.append("| Gap | Tuning | Test | Oct–Nov | Pass |\n|---|---|---|---|---|")
+            md.append("| Gap | Tuning | Test (z over break-even) | Oct–Nov | Pass |\n|---|---|---|---|---|")
             for row in r["table"]:
                 f = lambda x: f"{x['w']}-{x['l']} ({x['pct']}%)" if x["pct"] is not None else "—"
-                md.append(f"| {row['gap']}+ | {f(row['tune'])} | {f(row['test'])} | {f(row['early'])} | {'yes' if row['pass'] else 'no'} |")
+                zt = f" z {row['test']['zbe']}" if row["test"].get("zbe") is not None else ""
+                md.append(f"| {row['gap']}+ | {f(row['tune'])} | {f(row['test'])}{zt} | {f(row['early'])} | {'yes' if row['pass'] else 'no'} |")
             md.append("")
     with open(os.path.join(OUT, "bb_bpi.md"), "w") as fh:
         fh.write("\n".join(md) + "\n")
