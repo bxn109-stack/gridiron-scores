@@ -1,20 +1,20 @@
 # Basketball: ESPN BPI against the closing line
 
-Updated 2026-11-12T04:12+00:00. Take the side ESPN's BPI likes against the closing spread when BPI's projected margin differs from the line by at least the gap. The margin scale and gap are chosen on the tuning set and scored on a test set they never saw; a gap passes only at 52.38%+ (break-even at -110) on both, with 100+ test games and the test rate at least 1 standard error above break-even (z over break-even in the Test column). Many gaps and three leagues are tried, so a pass is a candidate rule that the live background record must confirm. Requests this run: 0.
+Updated 2026-11-12T04:13+00:00. Take the side ESPN's BPI likes against the closing spread when BPI's projected margin differs from the line by at least the gap. The margin scale and gap are chosen on the tuning set and scored on a test set they never saw; a gap passes only at 52.38%+ (break-even at -110) on both, with 100+ test games and the test rate at least 1 standard error above break-even (z over break-even in the Test column). Many gaps and three leagues are tried, so a pass is a candidate rule that the live background record must confirm. Requests this run: 4.
 
 ## NBA
 
-tuned on 2023, tested on 2026; 1320 tuning and 1061 test games with an ESPN win chance (355 in October-November). Margin scale 10.26. **no gap beats the closing line on both the tuning and the test set**.
+tuned on 2023, tested on 2026; 1320 tuning and 1065 test games with an ESPN win chance (355 in October-November). Margin scale 10.26. **no gap beats the closing line on both the tuning and the test set**.
 
 | Gap | Tuning | Test (z over break-even) | Oct–Nov | Pass |
 |---|---|---|---|---|
-| 0+ | 646-650 (49.85%) | 519-542 (48.92%) z -2.26 | 179-169 (51.44%) | no |
-| 1+ | 427-410 (51.02%) | 420-415 (50.3%) z -1.2 | 126-102 (55.26%) | no |
-| 2+ | 268-223 (54.58%) | 305-317 (49.04%) z -1.67 | 79-52 (60.31%) | no |
-| 3+ | 144-124 (53.73%) | 197-203 (49.25%) z -1.25 | 38-28 (57.58%) | no |
-| 4+ | 82-70 (53.95%) | 127-131 (49.22%) z -1.01 | 23-14 (62.16%) | no |
-| 5+ | 35-35 (50.0%) | 77-77 (50.0%) z -0.59 | 8-6 (57.14%) | no |
-| 6+ | 17-19 (47.22%) | 42-53 (44.21%) z -1.59 | 3-0 (100.0%) | no |
+| 0+ | 646-650 (49.85%) | 521-544 (48.92%) z -2.26 | 179-169 (51.44%) | no |
+| 1+ | 427-410 (51.02%) | 422-417 (50.3%) z -1.21 | 126-102 (55.26%) | no |
+| 2+ | 268-223 (54.58%) | 307-317 (49.2%) z -1.59 | 79-52 (60.31%) | no |
+| 3+ | 144-124 (53.73%) | 199-203 (49.5%) z -1.15 | 38-28 (57.58%) | no |
+| 4+ | 82-70 (53.95%) | 129-131 (49.62%) z -0.89 | 23-14 (62.16%) | no |
+| 5+ | 35-35 (50.0%) | 79-77 (50.64%) z -0.43 | 8-6 (57.14%) | no |
+| 6+ | 17-19 (47.22%) | 44-53 (45.36%) z -1.38 | 3-0 (100.0%) | no |
 | 7+ | 8-16 (33.33%) | 27-29 (48.21%) z -0.62 | 1-0 (100.0%) | no |
 | 8+ | 6-10 (37.5%) | 14-13 (51.85%) z -0.05 | — | no |
 | 10+ | 1-0 (100.0%) | 5-4 (55.56%) z 0.19 | — | no |
