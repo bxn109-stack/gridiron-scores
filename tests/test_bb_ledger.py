@@ -350,6 +350,8 @@ class Ledger(unittest.TestCase):
         self.assertEqual(len(self.doc("meta", "bbcmvars")["vars"]), len(B.CM_VARS))
         rows = self.doc("bbcmvars/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]["rows"]
         self.assertEqual({r[0] for r in rows}, {v[0] for v in B.CM_VARS})
+        self.assertIn("lg", self.doc("bbcmvars/2026-11-10/leagues", "NBA"))
+        self.assertEqual(next(r for r in rows if r[0] == "X1")[4], "none")      # no four factors in this fixture
         # final: graded from the score and the box score
         box = os.path.join(self.tmp.name, "box")
         os.makedirs(box)
@@ -455,6 +457,44 @@ class MarketChoice(unittest.TestCase):
         # no tested rate for the league: unchanged
         B.RULE["WBB"]["pct"] = None
         self.assertEqual(B.market_choice(self.game(), self.ev(-110, 130), lean)["mk"], "spread")
+
+
+class Matchup(unittest.TestCase):
+    """The four-factor matchups behind each pick's breakdown (Barry, Nov 14, 2026)."""
+    LG = {"efg": 52.0, "tov": 12.0, "orb": 25.0, "ftr": 30.0, "tpar": 40.0, "tp": 34.0, "twp": 51.0, "eff": 110.0, "pace": 70.0}
+
+    def ff(self, g, off, d):
+        base = {k: v for k, v in self.LG.items() if k not in ("eff", "pace")}
+        return {"ff": {"g": g, "off": dict(base, **off), "def": dict(base, **d)}}
+
+    def test_offense_against_defense_from_the_league(self):
+        a = self.ff(20, {"efg": 55.0}, {"efg": 50.0, "tov": 15.0})       # away: good shooting, good defense, forces turnovers
+        h = self.ff(20, {"efg": 50.0, "tov": 13.0}, {"efg": 54.0})       # home: poor shooting, poor defense
+        m = B.matchup(a, h, self.LG, 70.0)
+        # away shoots 55 against a defense allowing 54 in a 52 league: 57; home shoots 50 against 50 allowed: 48
+        self.assertEqual(m["efg"][:2], (57.0, 48.0))
+        self.assertAlmostEqual(m["efg"][2], round(1.72 * (48 - 57) * 0.7, 1))
+        # home turns it over 13 against a defense forcing 15: 16 per 100, a cost to home
+        self.assertEqual(m["tov"][:2], (12.0, 16.0))
+        self.assertAlmostEqual(m["tov"][2], round(1.1 * (12 - 16) * 0.7, 1))
+        self.assertIsNone(m["tpar"][2])                                  # shot profile is described, not scored
+        self.assertEqual(m["orb"][2], 0.0)
+
+    def test_small_samples_pulled_to_the_league(self):
+        a = self.ff(3, {"efg": 60.0}, {})
+        h = self.ff(3, {}, {"efg": 60.0})
+        raw = B.matchup(a, h, self.LG, 70.0)["efg"][0]
+        shrunk = B.matchup(a, h, self.LG, 70.0, shrink=5.0)["efg"][0]
+        self.assertEqual(raw, 68.0)
+        self.assertEqual(shrunk, round(52 + 2 * 8 * 3 / 8, 1))
+        self.assertEqual(B.matchup(self.ff(2, {}, {}), h, self.LG, 70.0), {})   # under three games: left out
+
+    def test_league_averages(self):
+        L = {"teams": {str(i): self.ff(5, {"efg": 50.0 + i}, {}) for i in range(5)} | {"9": self.ff(1, {"efg": 99.0}, {})},
+             "lg_eff": 110.0, "lg_pace": 70.0}
+        av = B.lg_ff(L, "T")
+        self.assertEqual(av["efg"], 52.0)                                 # the one-game team is left out
+        self.assertEqual((av["n"], av["eff"]), (5, 110.0))
 
 
 if __name__ == "__main__":

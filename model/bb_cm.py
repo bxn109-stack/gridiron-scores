@@ -258,7 +258,7 @@ def four_factors(G, f, season):
             A = acc[t]
             A["g"] += 1
             for pre, x in (("", mine), ("d_", theirs)):
-                for k in ("fga", "fgm", "tpm", "fta", "ftm", "to", "oreb", "reb", "pts"):
+                for k in ("fga", "fgm", "tpa", "tpm", "fta", "ftm", "to", "oreb", "reb", "pts", "ast"):
                     if x.get(k) is not None:
                         A[pre + k] += x[k]
                         A[pre + k + "_n"] += 1
@@ -273,6 +273,16 @@ def four_factors(G, f, season):
         def ff(pre):
             fga = A[pre + "fga"] or 1
             res = {"efg": round(100 * (A[pre + "fgm"] + 0.5 * A[pre + "tpm"]) / fga, 1), "ftr": round(100 * A[pre + "fta"] / fga, 1)}
+            # three-point profile (share of shots from three and the rate made) and assisted share of made shots
+            if A[pre + "tpa_n"] and A[pre + "fga_n"]:
+                res["tpar"] = round(100 * A[pre + "tpa"] / fga, 1)
+                if A[pre + "tpa"]:
+                    res["tp"] = round(100 * A[pre + "tpm"] / A[pre + "tpa"], 1)
+                twa = A[pre + "fga"] - A[pre + "tpa"]
+                if twa > 0:
+                    res["twp"] = round(100 * (A[pre + "fgm"] - A[pre + "tpm"]) / twa, 1)
+            if A[pre + "ast_n"] and A[pre + "fgm"]:
+                res["astr"] = round(100 * A[pre + "ast"] / A[pre + "fgm"], 1)
             if A[pre + "to_n"] and A[pre + "poss"]:
                 res["tov"] = round(100 * A[pre + "to"] / A[pre + "poss"], 1)
             opp = "d_" if pre == "" else ""

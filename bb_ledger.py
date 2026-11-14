@@ -745,6 +745,19 @@ CM_VARS = [
     ["G2", "Four factors: defense", "Forced turnover rate", "B", "Opponent turnovers per 100 possessions"],
     ["G3", "Four factors: defense", "Opponent offensive rebound rate", "B", "Allowed"],
     ["G4", "Four factors: defense", "Opponent free-throw rate", "B", "Allowed"],
+    ["F5", "Shot profile: offense", "Three-point attempt rate", "B", "3PA / FGA"],
+    ["F6", "Shot profile: offense", "Three-point %", "B", "3PM / 3PA"],
+    ["F7", "Shot profile: offense", "Two-point %", "B", "2PM / 2PA"],
+    ["G5", "Shot profile: defense", "Opponent three-point attempt rate", "B", "Allowed"],
+    ["G6", "Shot profile: defense", "Opponent three-point %", "B", "Allowed"],
+    ["G7", "Shot profile: defense", "Opponent two-point %", "B", "Allowed"],
+    ["X1", "Matchup", "Shooting: expected effective FG %", "B", "Each offense vs the other defense: offense + defense allowed - league; edge in points"],
+    ["X2", "Matchup", "Ball security: expected turnover rate", "B", "Offense + defense forced - league; edge in points"],
+    ["X3", "Matchup", "Second chances: expected offensive rebound rate", "B", "Offense + defense allowed - league; edge in points"],
+    ["X4", "Matchup", "Free throws: expected free-throw rate", "B", "Offense + defense allowed - league; edge in points"],
+    ["X5", "Matchup", "Three-point volume: expected 3PA rate", "C", "Offense + defense allowed - league (shot profile; counted in shooting)"],
+    ["X6", "Matchup", "Three-point accuracy: expected 3P %", "C", "Offense + defense allowed - league (counted in shooting)"],
+    ["X7", "Matchup", "Inside scoring: expected 2P %", "C", "Offense + defense allowed - league (counted in shooting)"],
     ["S1", "Schedule", "Days since the last game", "B", "From the schedule"],
     ["S2", "Schedule", "Second night of a back-to-back", "A", "Fitted effect in points on tuning seasons"],
     ["S3", "Schedule", "Home court", "A", "Fitted in points on tuning seasons (0 at a neutral site)"],
@@ -786,6 +799,68 @@ def cm_player(L, tm, name):
     roster = ((L.get("players") or {}).get(tm) or {})
     cands = [dict(v, n=k) for k, v in roster.items()]
     return A.find_player(name, cands) if cands else None
+
+
+# Matchup edges (Barry, Nov 14, 2026: a detailed, specific reason with every pick). Each factor pits one team's offense
+# against the other team's defense, measured from the league: expected = offense + defense allowed - league average.
+# Approximate points per 100 possessions for one percentage point of each factor (standard box-score weights: about
+# 0.86 shots a possession, a turnover costs a possession, an offensive rebound buys one back on about half the misses).
+FF_PTS = {"efg": 1.72, "orb": 0.5, "ftr": 0.6}
+FF_MIN_G = 3
+# Small samples are pulled toward the league before they are combined (weight games / (games + FF_SHRINK)): early
+# college numbers come from uneven schedules and are not adjusted for opponents.
+FF_SHRINK = {"NBA": 2.0, "WNBA": 2.0, "MBB": 5.0, "WBB": 5.0}
+_LG_FF = {}
+
+
+def lg_ff(L, lg=None):
+    """League averages of the offense four factors and shot profile over teams with FF_MIN_G+ games (plus league
+    efficiency and pace): {efg, tov, orb, ftr, tpar, tp, twp, eff, pace, n}."""
+    key = (lg, id(L))
+    if key in _LG_FF:
+        return _LG_FF[key]
+    acc = {}
+    for t in (L.get("teams") or {}).values():
+        f = t.get("ff") or {}
+        if (f.get("g") or 0) < FF_MIN_G:
+            continue
+        for k, v in (f.get("off") or {}).items():
+            if isinstance(v, (int, float)):
+                acc.setdefault(k, []).append(v)
+    out = {k: round(statistics.mean(v), 1) for k, v in acc.items() if len(v) >= 5 and k != "rtg"}
+    out["n"] = max((len(v) for v in acc.values()), default=0)
+    out["eff"], out["pace"] = L.get("lg_eff", 100.0), L.get("lg_pace", 70.0)
+    _LG_FF[key] = out
+    return out
+
+
+def matchup(a, h, lgav, pc, shrink=0.0):
+    """Four-factor and shot-profile matchups for away team a and home team h (bb_cm team dicts), at pc possessions.
+    {key: (expected for away, expected for home, home edge in points or None)}; a factor is left out when either
+    team lacks it or has fewer than FF_MIN_G games. Each team's numbers are pulled toward the league by
+    games / (games + shrink) before they are combined."""
+    fa, fh = a.get("ff") or {}, h.get("ff") or {}
+    if (fa.get("g") or 0) < FF_MIN_G or (fh.get("g") or 0) < FF_MIN_G:
+        return {}
+    wa, wh = fa["g"] / (fa["g"] + shrink), fh["g"] / (fh["g"] + shrink)
+    out = {}
+    for k in ("efg", "tov", "orb", "ftr", "tpar", "tp", "twp"):
+        lgk = lgav.get(k)
+        ao, ad = (fa.get("off") or {}).get(k), (fa.get("def") or {}).get(k)
+        ho, hd = (fh.get("off") or {}).get(k), (fh.get("def") or {}).get(k)
+        if None in (lgk, ao, ad, ho, hd):
+            continue
+        ao, ad = lgk + wa * (ao - lgk), lgk + wa * (ad - lgk)
+        ho, hd = lgk + wh * (ho - lgk), lgk + wh * (hd - lgk)
+        ea, eh = ao + hd - lgk, ho + ad - lgk
+        if k == "tov":
+            edge = (lgav["eff"] / 100) * (ea - eh) * pc / 100      # the other side's turnovers help home
+        elif k in FF_PTS:
+            edge = FF_PTS[k] * (eh - ea) * pc / 100
+        else:
+            edge = None
+        out[k] = (round(ea, 1), round(eh, 1), None if edge is None else round(edge, 1))
+    return out
 
 
 def prop_proj(L, team_ids, abbrs, prop, pf):
@@ -995,6 +1070,17 @@ def cm_card(g, e, lg, CMd, now):
                          ("G1", "def", "efg"), ("G2", "def", "tov"), ("G3", "def", "orb"), ("G4", "def", "ftr")):
         va, vh = ff(a, side, k), ff(h, side, k)
         row(vid, va, vh, "measured" if va is not None and vh is not None else "none")
+    for vid, side, k in (("F5", "off", "tpar"), ("F6", "off", "tp"), ("F7", "off", "twp"),
+                         ("G5", "def", "tpar"), ("G6", "def", "tp"), ("G7", "def", "twp")):
+        va, vh = ff(a, side, k), ff(h, side, k)
+        row(vid, va, vh, "measured" if va is not None and vh is not None else "none")
+    mx = matchup(a, h, lg_ff(L, lg), pc, FF_SHRINK.get(lg, 3.0))
+    for vid, k in (("X1", "efg"), ("X2", "tov"), ("X3", "orb"), ("X4", "ftr"), ("X5", "tpar"), ("X6", "tp"), ("X7", "twp")):
+        if k in mx:
+            ea, eh, ed = mx[k]
+            row(vid, ea, eh, "measured", sg(ed) if ed is not None else None)
+        else:
+            row(vid, None, None, "none")
     row("S1", ra, rh, "measured" if ra is not None or rh is not None else "none")
     row("S2", ra == 1, rh == 1, "measured", sg(round(b2b, 1)) if b2b else None)
     row("S3", 0.0, round(hca, 1), "measured", sg(round(hca, 1)) if hca else None)
@@ -1558,8 +1644,10 @@ def main(argv=None):
         old = (old or {}).get("data", old) if old and "games" not in old else old
         games = dict((old or {}).get("games") or {})
         games.update(rows)
-        if games != (old or {}).get("games"):
-            f = write(args.out, f"{args.slate}__cmvars_{lg}.json", {"slate": args.slate, "league": lg, "updatedAt": now_iso, "games": games})
+        L = cm_league(CM, lg) if CM else None
+        lgav = lg_ff(L, lg) if L else (old or {}).get("lg")
+        if games != (old or {}).get("games") or lgav != (old or {}).get("lg"):
+            f = write(args.out, f"{args.slate}__cmvars_{lg}.json", {"slate": args.slate, "league": lg, "updatedAt": now_iso, "lg": lgav, "games": games})
             manifest.append({"op": "set", "collection": f"bbcmvars/{args.slate}/leagues", "doc_id": lg, "file_path": f})
     if CM:
         for name, body in (("bbcmmodel", cm_model_doc(CM)), ("bbcmvars", {"version": CM_VERSION, "vars": CM_VARS})):
