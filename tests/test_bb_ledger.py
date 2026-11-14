@@ -391,5 +391,71 @@ class Ledger(unittest.TestCase):
         self.assertEqual(g["lock"]["lm"]["m"], -0.5)
 
 
+    def test_moneyline_lean_is_graded_at_its_price(self):
+        tip = "2026-11-11T00:00Z"
+        g = fgame("5", "WBB", tip, "Away", "Home", hl=-2.5, tot=140.5, hp=47.0)        # BPI Away by 1.1 vs Home -2.5
+        for k in ("quotes", "qopen", "qclose"):
+            g[k]["DraftKings"]["ml"] = {"A": 125, "H": -145}
+        self.put_feed("2026-11-10", [g])
+        self.apply(self.run_ledger("2026-11-10T16:00:00Z"))
+        lean = self.doc("bbslates/2026-11-10/leagues", "WBB")["games"]["WBB-away-home"]["lean"]
+        self.assertEqual((lean["mk"], lean["side"], lean["ln"]), ("ml", "A", 125))
+        self.put_feed("2026-11-10", [fgame("5", "WBB", tip, "Away", "Home", hl=-2.5, tot=140.5, state="post", sa=70, sh=66)])
+        self.apply(self.run_ledger("2026-11-11T03:00:00Z", slate=None))
+        row = self.doc("bbresults", "2026-11-10")["games"]["WBB-away-home"]
+        self.assertEqual((row["lean"], row["mk"], row["am"]), ("W", "ml", 125))
+
+    def test_claude_model_top_play_can_be_moneyline(self):
+        tip = "2026-11-11T00:00Z"
+        cm = os.path.join(self.tmp.name, "bb_cm.json")
+        wj({"updatedAt": "2026-11-10T12:00Z", "version": "bbcm-1", "leagues": {"NBA": {
+            "params": {"hca": 2.5, "b2b": 0.0}, "lg_eff": 114.0, "lg_pace": 99.0, "sigma_m": 12.5,
+            "gate": {"pass": False, "a_fit": 0.0, "b_fit": 0.2, "scale": 4.0}, "gate_total": {"pass": False, "a_fit": 0.0, "b_fit": 0.1, "scale": 5.0},
+            "teams": {"27": {"n": "Hawks", "o": 3.0, "d": 1.0, "p": 1.0}, "17": {"n": "Lakers", "o": 1.0, "d": -1.0, "p": 0.5}}, "players": {}}}}, cm)
+        for ml_h, want in ((-120, "ml"), (-400, "spread")):
+            g = fgame("7", "NBA", tip, "Lakers", "Hawks", hl=-1.5, tot=None, hp=53.5)
+            for k in ("quotes", "qopen", "qclose"):
+                g[k]["DraftKings"]["ml"] = {"A": 100, "H": ml_h}
+                g[k]["DraftKings"]["total"] = {}
+            self.put_feed("2026-11-10", [g])
+            for f in os.listdir(self.docs):
+                import shutil
+                shutil.rmtree(os.path.join(self.docs, f))
+            self.apply(self.run_ledger("2026-11-10T16:00:00Z", extra=["--cm", cm]))
+            c = self.doc("bbslates/2026-11-10/leagues", "NBA")["games"]["NBA-lakers-hawks"]["cm"]
+            # Claude has the Hawks well past -1.5; the calibrated spread chance (about 60%) implies about 65% to win, so
+            # -120 pays more than the spread at -110, while -400 is past the -300 limit
+            self.assertEqual((c["best"], c["picks"]["ml"]["side"], c["picks"]["ml"]["am"]), (want, "H", ml_h))
+            self.assertGreater(c["picks"]["ml"]["pc"], 60)
+
+
+class MarketChoice(unittest.TestCase):
+    def setUp(self):
+        B.RULE.clear()
+        B.RULE.update({"WBB": {"gap": 6, "sig": 16.11, "rec": "95-70", "pct": 57.58}})
+
+    def tearDown(self):
+        B.RULE.clear()
+
+    def game(self):
+        return {"lg": "WBB", "a": {"n": "Away"}, "h": {"n": "Home"}, "line": {"fav": "H", "sp": 2.5}}
+
+    def ev(self, sp_am, ml_am):
+        return {"quotes": {"DraftKings": {"spread": {"A": [2.5, sp_am], "H": [-2.5, -110]}, "ml": {"A": ml_am, "H": -150}}}}
+
+    def test_moneyline_replaces_spread_when_it_pays_more(self):
+        lean = {"mk": "spread", "side": "A", "ln": 2.5, "conf": 1, "why": "BPI likes Away."}
+        out = B.market_choice(self.game(), self.ev(-110, 130), lean)
+        self.assertEqual((out["mk"], out["side"], out["ln"]), ("ml", "A", 130))
+        self.assertIn("moneyline at +130", out["why"])
+        # a thin moneyline price: the spread stays
+        self.assertEqual(B.market_choice(self.game(), self.ev(-110, 105), lean)["mk"], "spread")
+        # outside -300..+250: never the moneyline
+        self.assertEqual(B.market_choice(self.game(), self.ev(-110, 400), lean)["mk"], "spread")
+        # no tested rate for the league: unchanged
+        B.RULE["WBB"]["pct"] = None
+        self.assertEqual(B.market_choice(self.game(), self.ev(-110, 130), lean)["mk"], "spread")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -72,7 +72,11 @@ BPI_SRC = "ESPN BPI"
 CAL_MIN = 5            # games a source needs on a day before its own market scale is trusted fully (shrunk toward 1)
 VETO = 1.0             # other projections this far (points) on the other side of the line veto a lean
 RULE = {}              # {lg: {"gap": points or None, "sig": BPI margin scale, "rec": "test record at the gap"}}
-TOTAL_LEANS = False    # totals are not tested yet: no total leans
+TOTAL_LEANS = False    # totals are not tested yet: no total leans (no basketball totals model has passed a backtest)
+# MARKET CHOICE (Barry, Nov 14, 2026: a moneyline can be the lean and Claude's top play). Moneylines are considered only
+# from -300 favorites (Barry's bet-builder limit) to +250 underdogs (past that, a normal margin curve overrates long shots).
+ML_MIN, ML_MAX = -300, 250
+SIG_OUT = {"NBA": 12.0, "WNBA": 11.0, "MBB": 11.0, "WBB": 13.0}   # spread of final margins around the line
 LOCK_BEFORE = dt.timedelta(minutes=15)
 DEAD = ("STATUS_POSTPONED", "STATUS_CANCELED")
 
@@ -186,12 +190,13 @@ def load_rule(res):
     """{lg: {gap, sig, rec}} from model/results/bb_bpi.json. A league without a passing gap gets gap None (no leans)."""
     out = {}
     for lg, r in ((res or {}).get("leagues") or {}).items():
-        gap, rec = r.get("gap"), None
+        gap, rec, pct = r.get("gap"), None, None
         for row in r.get("table") or []:
             if gap is not None and row.get("gap") == gap:
                 t = row.get("test") or {}
                 rec = f"{t.get('w')}-{t.get('l')}, {t.get('pct')}% on test games"
-        out[lg] = {"gap": gap, "sig": r.get("sig"), "rec": rec}
+                pct = t.get("pct")
+        out[lg] = {"gap": gap, "sig": r.get("sig"), "rec": rec, "pct": pct}
     return out
 
 
@@ -314,6 +319,49 @@ def total_case(g):
     if votes:
         why += f" Expert picks: net {abs(votes)} toward the {'Over' if votes > 0 else 'Under'}."
     return {"mk": "total", "side": side, "ln": float(tot), "conf": conf, "why": why}, score
+
+
+def am_dec(am):
+    return None if am is None else (1 + am / 100 if am > 0 else 1 + 100 / -am)
+
+
+def side_prices(e, side):
+    """DraftKings' current (or last pre-tip) spread and moneyline prices for one side: (spread am, ml am)."""
+    for key in ("quotes", "qclose"):
+        q = ((e or {}).get(key) or {}).get("DraftKings")
+        if q:
+            sp = (q.get("spread") or {}).get(side)
+            ml = (q.get("ml") or {}).get(side)
+            return (sp[1] if sp and sp[1] is not None else None), ml
+    return None, None
+
+
+def market_choice(g, e, lean):
+    """MARKET CHOICE for a lean that passed THE LEAN RULE: the same tested view (BPI's side covers at the test-set rate,
+    i.e. a margin shift toward the side) priced on the spread and on the moneyline; the moneyline replaces the spread
+    when it is within ML_MIN..ML_MAX and pays more for that view. Returns the lean (changed or not)."""
+    if not lean or lean.get("mk") != "spread":
+        return lean
+    rule = RULE.get(g["lg"]) or {}
+    pct, lhm = rule.get("pct"), line_hm(g)
+    side = lean["side"]
+    sp_am, ml_am = side_prices(e, side)
+    if not pct or lhm is None or ml_am is None or not ML_MIN <= ml_am <= ML_MAX:
+        return lean
+    sig = SIG_OUT.get(g["lg"], 12.0)
+    p_cov = pct / 100
+    shift = sig * inv_phi(p_cov)                         # how far the tested view moves the margin toward the side
+    side_mkt = lhm if side == "H" else -lhm              # the side's margin the line implies
+    p_win = phi((side_mkt + shift) / sig)
+    ev_sp = p_cov * am_dec(sp_am if sp_am is not None else -110) - 1
+    ev_ml = p_win * am_dec(ml_am) - 1
+    if ev_ml <= ev_sp:
+        return lean
+    name = g["h"]["n"] if side == "H" else g["a"]["n"]
+    out = dict(lean, mk="ml", ln=ml_am)
+    out["why"] = (lean["why"] + f" Best price for this view: {name} on the moneyline at {'+' if ml_am > 0 else ''}{ml_am:g} "
+                  f"(about {100 * p_win:.0f}% to win, {100 * ev_ml:+.0f}% expected) beats the spread ({100 * ev_sp:+.0f}%).")
+    return out
 
 
 def lean_eval(g, cal=None):
@@ -459,6 +507,7 @@ def build_game(e, lg, old, ctx, now):
 def finalize_lean(g, e, old, now, cal):
     """The lean (THE LEAN RULE, with the day's market scales), BPI's gap for the background record, and the star case."""
     lean, score = lean_eval(g, cal)
+    lean = market_choice(g, e, lean)
     _, _, veto = spread_case(g, cal)
     gap = bpi_gap(g)
     g["bpi"] = {"e": gap, "gap": (RULE.get(g["lg"]) or {}).get("gap")} if gap is not None else None
@@ -878,8 +927,39 @@ def cm_card(g, e, lg, CMd, now):
             mu = (0.6 * (v.get("pts") or 0) + 0.4 * (v.get("r5_pts") or v.get("pts") or 0)) * pf.get(abbr[s], 1.0)
             sd = max(v.get("sd_pts") or 0, 0.3 * (v.get("pts") or 0) + 0.8)
             proj.append({"pl": k, "tm": abbr[s], "mk": "Points", "proj": round(mu, 1), "lo": round(max(0, mu - 0.674 * sd), 1), "hi": round(mu + 0.674 * sd, 1)})
-    cand = [(abs(v["p"] - 50), k) for k, v in picks.items() if k in ("spread", "total") and v.get("p") is not None]
-    cand += [(abs(x["p"] - 50), "prop") for x in cprops[:1] if x]
+    # Top play: the pick with the most expected profit at its posted price (Barry, Nov 14, 2026: the moneyline can be the
+    # top play too). The moneyline chance comes from the same calibrated view as the spread pick (the margin shift that
+    # gives the spread pick its chance), so a big raw win chance alone never makes the moneyline the top play.
+    def prop_dec(x, p):
+        try:
+            o = int(str(p.get("odds")).split()[0].replace("+", "")) if p and p.get("odds") else -110
+        except ValueError:
+            o = -110
+        return am_dec(o)
+    cand = []
+    for k in ("spread", "total"):
+        v = picks.get(k)
+        if v and v.get("p") is not None:
+            am = side_prices(e, v["side"])[0] if k == "spread" else None
+            if k == "total":
+                q = ((e.get("quotes") or e.get("qclose") or {}).get("DraftKings") or {}).get("total") or {}
+                am = (q.get(v["side"]) or [None, None])[1]
+            cand.append((v["p"] / 100 * am_dec(am if am is not None else -110) - 1, k))
+    if cprops[:1] and cprops[0]:
+        cand.append((cprops[0]["p"] / 100 * prop_dec(cprops[0], (g.get("props") or [None])[0]) - 1, "prop"))
+    if "spread" in picks and sp is not None and fav_l in ("A", "H"):
+        s_ = picks["spread"]
+        p_home_cov = s_["p"] / 100 if s_["side"] == "H" else 1 - s_["p"] / 100
+        mu = line_hm + sig_m * inv_phi(p_home_cov)
+        p_ml_home = phi(mu / sig_m)
+        ml_side = picks["ml"]["side"]
+        ml_am = side_prices(e, ml_side)[1]
+        if ml_am is not None:
+            picks["ml"]["am"] = ml_am
+            pw_cal = p_ml_home if ml_side == "H" else 1 - p_ml_home
+            picks["ml"]["pc"] = round(100 * pw_cal, 1)
+            if ML_MIN <= ml_am <= ML_MAX:
+                cand.append((pw_cal * am_dec(ml_am) - 1, "ml"))
     best = max(cand)[1] if cand else "ml"
     if best == "prop":
         i0 = next(i for i, x in enumerate(cprops) if x)
@@ -1209,6 +1289,8 @@ def grade_docs(docs_by_slate, pre_old, feed, now, now_iso, pool_cache, opts=None
                                     cnt[r] += 1
                             row = {"lg": g["lg"], "su": su, "lean": lean, "star": star, "conf": l.get("conf"), "mk": l.get("mk"),
                                    "props": cnt, "locked": bool(lock), "v": bool((lock or {}).get("v"))}
+                            if l.get("mk") == "ml" and isinstance(l.get("ln"), (int, float)) and abs(l["ln"]) >= 100:
+                                row["am"] = l["ln"]                 # the record counts a moneyline lean at its own price
                             bp = g.get("bpi") or {}
                             lh = line_hm(gl)
                             if bp.get("e") and lh is not None:      # background record: BPI's side, every game

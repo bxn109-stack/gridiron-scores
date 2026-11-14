@@ -901,6 +901,8 @@ def main():
                         results[gid] = {"lg": g["lg"], "su": su, "lean": lean, "star": star,
                                         "conf": l.get("conf"), "mk": l.get("mk"), "props": cnt, "locked": bool(lock),
                                         "v": bool((lock or {}).get("v"))}
+                        if l.get("mk") == "ml" and isinstance(l.get("ln"), (int, float)) and abs(l["ln"]) >= 100:
+                            results[gid]["am"] = l["ln"]    # a moneyline lean is counted at its own price (Nov 14, 2026)
                         cv = ch.get("clv") or g.get("clv")
                         if cv:
                             if cv.get("pts") is not None:

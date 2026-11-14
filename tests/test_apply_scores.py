@@ -129,6 +129,20 @@ class Grading(unittest.TestCase):
             self.assertTrue(res["locked"])
             self.assertIn("season archive", err)
 
+    def test_moneyline_lean_counted_at_its_price(self):
+        with tempfile.TemporaryDirectory() as t:
+            R = Run(t)
+            old = espn("E7", "2026-10-25T17:00Z", ("Denver", "Broncos", "DEN"), ("Kansas City", "Chiefs", "KC"), sc=(27, 24),
+                       lines=((7, 7, 6, 7), (3, 7, 7, 7)))
+            R.final("2026-10-25", [old])
+            R.feed([])
+            g = ledger_game("NFL-broncos-chiefs", "2026-10-25T13:00:00-04:00", "Broncos", "Chiefs",
+                            lean={"mk": "ml", "side": "A", "ln": 145, "conf": 1, "why": "Broncos projected to win outright."})
+            R.doc("2026-10-24", "NFL", [g])
+            man, files, err = R.go()
+            res = files[("results", "2026-10-24")]["games"]["NFL-broncos-chiefs"]
+            self.assertEqual((res["lean"], res["mk"], res["am"]), ("W", "ml", 145))   # Broncos won outright at +145
+
     def test_no_unresolved_before_a_day(self):
         with tempfile.TemporaryDirectory() as t:
             R = Run(t)
