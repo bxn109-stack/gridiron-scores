@@ -2,7 +2,7 @@
 
 A small robot for Barry's Gridiron Ledger picks page.
 
-- **`fetch_scores.py`** runs on GitHub Actions every 5 minutes during US game windows (and once a day in full). It reads ESPN's public scoreboard for the NFL, FBS and FCS and saves:
+- **`fetch_scores.py`** runs on GitHub Actions every 5 minutes during US game windows (and once a day in full). GitHub often skips scheduled runs for hours, so a run that finds no game on waits inside the job until 45 minutes before the next kickoff when that kickoff is within 4 hours, instead of stopping. It reads ESPN's public scoreboard for the NFL, FBS and FCS and saves:
   - `scores/latest.json`: every game from 4 days ago to 7 days ahead, with status, clock, score, quarter scores, rank, record and sportsbook quotes (current, opening and last pre-kickoff numbers per book, each with the time it was first seen).
   - `scores/final/<date>.json`: every finished game for the season, one file per US Eastern date, so old games can still be graded.
   - `box/<id>.json`: player box scores for finished NFL and FBS games (kept for the season), with a PrizePicks-style fantasy score.

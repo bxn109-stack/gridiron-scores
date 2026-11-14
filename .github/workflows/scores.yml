@@ -48,7 +48,14 @@ jobs:
           while true; do
             if [ "$full" = "true" ]; then python3 fetch_scores.py --full; full=false; else python3 fetch_scores.py; fi
             save
-            if ! python3 fetch_scores.py --busy; then echo "No games on right now; stopping."; break; fi
+            if ! python3 fetch_scores.py --busy; then
+              # GitHub often skips scheduled runs for hours, so bridge short gaps before the next kickoff here.
+              nap=$(python3 fetch_scores.py --wait 2>/dev/null || echo 0)
+              if [ "${nap:-0}" -gt 0 ] 2>/dev/null && [ $(( $(date +%s) - start + nap )) -lt 19800 ]; then
+                echo "Next kickoff soon; waiting ${nap}s."; sleep "$nap"; continue
+              fi
+              echo "No games on right now; stopping."; break
+            fi
             if [ $(( $(date +%s) - start )) -gt 19800 ]; then echo "Time limit reached; the next scheduled run takes over."; break; fi
             sleep 300
           done

@@ -14,6 +14,8 @@ Usage
   python3 fetch_scores.py          quick run: refreshes yesterday and today (ET)
   python3 fetch_scores.py --full   full run: refreshes the whole window
   python3 fetch_scores.py --busy   exit 0 if a game is on or starts within 45 minutes
+  python3 fetch_scores.py --wait   print how many seconds to sleep until 45 minutes before the next kickoff
+                                   (0 when that kickoff is more than 4 hours away), so a run can bridge the gap
 """
 import datetime as dt
 import json
@@ -37,6 +39,7 @@ KEEP_DAYS_BACK, KEEP_DAYS_AHEAD = 4, 7  # ahead: lets the Friday board build rea
 ARCHIVE_START = dt.date(2026, 9, 22)     # first ledger slate; finals from here on are archived for grading
 BACKFILL_MAX_DATES = 60                  # archive dates fetched per run when catching up
 BOX_MAX_PER_RUN = 600
+WAIT_MAX_H = 4                           # --wait: bridge gaps up to this long before the next kickoff
 CHECK_EVERY_MIN = 30                     # rewrite latest.json at least this often so its checkedAt stays fresh
 HEADERS = {"User-Agent": "gridiron-scores/1.0 (personal scoreboard)", "Accept": "application/json"}
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -240,12 +243,42 @@ def parse_box(summary):
     return out
 
 
-def busy():
-    """Exit code 0 when a game is in progress or kicks off within 45 minutes (keep the robot running)."""
+def _load_games():
     try:
         with open(os.path.join(ROOT, "scores", "latest.json")) as f:
-            games = json.load(f).get("games", [])
+            return json.load(f).get("games", [])
     except (OSError, ValueError):
+        return None
+
+
+def _kickoff(g):
+    """Kickoff time of a game that has not started and is not postponed or cancelled, else None."""
+    if g.get("state") != "pre" or g.get("status") in ("STATUS_POSTPONED", "STATUS_CANCELED"):
+        return None
+    try:
+        return dt.datetime.fromisoformat(g["date"].replace("Z", "+00:00"))
+    except (KeyError, ValueError, AttributeError):
+        return None
+
+
+def wait_secs(games, now=None):
+    """Seconds to sleep until 45 minutes before the next kickoff, when that kickoff is within WAIT_MAX_H hours.
+    GitHub often drops scheduled runs for hours, so a run that ends just before a game window can leave
+    the whole window without scores; waiting inside the run bridges that gap. 0 means stop now."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    kos = [k for k in (_kickoff(g) for g in games or []) if k and k > now]
+    if not kos:
+        return 0
+    nxt = min(kos)
+    if nxt > now + dt.timedelta(hours=WAIT_MAX_H):
+        return 0
+    return max(60, int((nxt - dt.timedelta(minutes=45) - now).total_seconds()))
+
+
+def busy():
+    """Exit code 0 when a game is in progress or kicks off within 45 minutes (keep the robot running)."""
+    games = _load_games()
+    if games is None:
         return 1
     now = dt.datetime.now(dt.timezone.utc)
     for g in games:
@@ -327,6 +360,9 @@ def day_over(games, d):
 def main():
     if "--busy" in sys.argv:
         sys.exit(busy())
+    if "--wait" in sys.argv:
+        print(wait_secs(_load_games()))
+        return
     full = "--full" in sys.argv
     now_utc = dt.datetime.now(dt.timezone.utc)
     retrieved = now_utc.isoformat(timespec="seconds")

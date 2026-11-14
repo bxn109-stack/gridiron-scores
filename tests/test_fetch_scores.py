@@ -118,5 +118,28 @@ class Archive(unittest.TestCase):
         self.assertIsNone(FS.et_date({"date": None}))
 
 
+class WaitForKickoff(unittest.TestCase):
+    NOW = FS.dt.datetime(2026, 11, 14, 15, 40, tzinfo=FS.dt.timezone.utc)   # 10:40 AM ET Saturday
+
+    def g(self, iso, state="pre", status="STATUS_SCHEDULED"):
+        return {"date": iso, "state": state, "status": status}
+
+    def test_waits_until_45_minutes_before_next_kickoff(self):
+        games = [self.g("2026-11-14T17:00Z"), self.g("2026-11-14T20:30Z"), self.g("2026-11-13T23:00Z", "post")]
+        self.assertEqual(FS.wait_secs(games, self.NOW), 35 * 60)     # noon ET kickoff -> wake at 11:15 ET
+
+    def test_stops_when_next_kickoff_is_far_off(self):
+        self.assertEqual(FS.wait_secs([self.g("2026-11-15T18:00Z")], self.NOW), 0)
+        self.assertEqual(FS.wait_secs([], self.NOW), 0)
+        self.assertEqual(FS.wait_secs(None, self.NOW), 0)
+
+    def test_ignores_postponed_and_started_games(self):
+        games = [self.g("2026-11-14T16:30Z", status="STATUS_POSTPONED"), self.g("2026-11-14T15:00Z", "in")]
+        self.assertEqual(FS.wait_secs(games, self.NOW), 0)
+
+    def test_minimum_nap(self):
+        self.assertEqual(FS.wait_secs([self.g("2026-11-14T16:20Z")], self.NOW), 60)
+
+
 if __name__ == "__main__":
     unittest.main()
