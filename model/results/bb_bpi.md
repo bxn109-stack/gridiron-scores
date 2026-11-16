@@ -1,6 +1,6 @@
 # Basketball: ESPN BPI against the closing line
 
-Updated 2026-11-12T04:13+00:00. Take the side ESPN's BPI likes against the closing spread when BPI's projected margin differs from the line by at least the gap. The margin scale and gap are chosen on the tuning set and scored on a test set they never saw; a gap passes only at 52.38%+ (break-even at -110) on both, with 100+ test games and the test rate at least 1 standard error above break-even (z over break-even in the Test column). Many gaps and three leagues are tried, so a pass is a candidate rule that the live background record must confirm. Requests this run: 4.
+Updated 2026-11-16T20:27+00:00. Take the side ESPN's BPI likes against the closing spread when BPI's projected margin differs from the line by at least the gap. The margin scale and gap are chosen on the tuning set and scored on a test set they never saw; a gap passes only at 52.38%+ (break-even at -110) on both, with 100+ test games and the test rate at least 1 standard error above break-even (z over break-even in the Test column). Many gaps and three leagues are tried, so a pass is a candidate rule that the live background record must confirm. Requests this run: 0.
 
 ## NBA
 
