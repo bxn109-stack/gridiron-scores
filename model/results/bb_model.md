@@ -1,10 +1,10 @@
 # Basketball Ledger Model
 
-Updated 2026-11-17T21:06Z. The football Ledger Model's engine on basketball: walk-forward points ratings; settings tuned on early seasons, scored on later seasons never seen while tuning, against ESPN's closing lines. Break-even at −110 is 52.4%.
+Updated 2026-11-18T20:42Z. The football Ledger Model's engine on basketball: walk-forward points ratings; settings tuned on early seasons, scored on later seasons never seen while tuning, against ESPN's closing lines. Break-even at −110 is 52.4%.
 
 ## NBA
 
-Seasons on disk [2023, 2024, 2025, 2026, 2027]; 2578 games with a closing line. Tuned on 2023–2024, tested on 2025–2026. Settings `{"k": 0.03, "kt": 0.04, "regress": 0.8, "hfa": 3.0, "cap": 30}`.
+Seasons on disk [2023, 2024, 2025, 2026, 2027]; 2583 games with a closing line. Tuned on 2023–2024, tested on 2025–2026. Settings `{"k": 0.03, "kt": 0.04, "regress": 0.8, "hfa": 3.0, "cap": 30}`.
 - Average miss on the margin, test seasons: model 11.73 pts vs closing line 11.20 pts (1066 games)
 - Spread gate: **FAIL** (no reliable gain over the closing line (log-loss gain -0.0006, t = -0.55))
 - Total gate: **FAIL** (the model's edge has the wrong sign)
@@ -13,7 +13,7 @@ Seasons on disk [2023, 2024, 2025, 2026, 2027]; 2578 games with a closing line. 
 
 ## MBB
 
-Seasons on disk [2023, 2024, 2025, 2026, 2027]; 11110 games with a closing line. Tuned on 2024–2024, tested on 2025–2026. Settings `{"k": 0.11, "kt": 0.06, "regress": 0.95, "hfa": 4.0, "cap": 30}`.
+Seasons on disk [2023, 2024, 2025, 2026, 2027]; 11165 games with a closing line. Tuned on 2024–2024, tested on 2025–2026. Settings `{"k": 0.11, "kt": 0.06, "regress": 0.95, "hfa": 4.0, "cap": 30}`.
 - Average miss on the margin, test seasons: model 9.21 pts vs closing line 8.86 pts (4766 games)
 - Spread gate: **FAIL** (not enough games with a closing line)
 - Total gate: **FAIL** (not enough games with a closing line)
@@ -22,12 +22,12 @@ Seasons on disk [2023, 2024, 2025, 2026, 2027]; 11110 games with a closing line.
 
 ## WBB
 
-Seasons on disk [2023, 2024, 2025, 2026, 2027]; 892 games with a closing line. Tuned on 2024–2024, tested on 2025–2026. Settings `{"k": 0.11, "kt": 0.06, "regress": 0.95, "hfa": 3.25, "cap": 35}`.
+Seasons on disk [2023, 2024, 2025, 2026, 2027]; 898 games with a closing line. Tuned on 2024–2024, tested on 2025–2026. Settings `{"k": 0.11, "kt": 0.06, "regress": 0.95, "hfa": 3.25, "cap": 35}`.
 - Average miss on the margin, test seasons: model 10.70 pts vs closing line 9.82 pts (811 games)
 - Spread gate: **FAIL** (not enough games with a closing line)
 - Total gate: **FAIL** (not enough games with a closing line)
 - Moneyline blend gate: **FAIL** (not enough games with moneylines)
-- Ratings for 929 teams; push tables: 63 spread rows, 62 total rows
+- Ratings for 929 teams; push tables: 64 spread rows, 62 total rows
 
 ## WNBA
 
