@@ -1,27 +1,27 @@
 # Basketball Claude Model
 
-Updated 2026-11-18T20:43Z. Claude's own algorithm from box-score data only (possessions, efficiency, pace, four factors, rest). Tuned on early seasons, scored walk-forward on later seasons it never saw. Gated: it is labeled unvalidated and moves no chance until the spread gate passes. Break-even at −110 is 52.4%.
+Updated 2026-11-19T20:49Z. Claude's own algorithm from box-score data only (possessions, efficiency, pace, four factors, rest). Tuned on early seasons, scored walk-forward on later seasons it never saw. Gated: it is labeled unvalidated and moves no chance until the spread gate passes. Break-even at −110 is 52.4%.
 
 ## NBA
 
-Settings `{"k": 0.04, "kp": 0.03, "regress": 0.7, "hca": 3.0, "b2b": -2.65}`; 5501 of 5501 games had box totals.
+Settings `{"k": 0.04, "kp": 0.03, "regress": 0.7, "hca": 3.0, "b2b": -2.65}`; 5513 of 5513 games had box totals.
 - Test seasons 2025–2026: 49.44% against the closing spread (1066 games), 67.23% winners, 51.22% on totals (1066); margin miss 11.25 vs the close's 11.2
-- Gate: **FAIL** (no reliable gain over the closing line (log-loss gain -0.0003, t = -0.29)); games with a closing line: 2583
-- 30 teams rated this season; players with box scores: 387
+- Gate: **FAIL** (no reliable gain over the closing line (log-loss gain -0.0003, t = -0.29)); games with a closing line: 2595
+- 30 teams rated this season; players with box scores: 390
 
 ## MBB
 
-Settings `{"k": 0.11, "kp": 0.03, "regress": 0.85, "hca": 3.0, "b2b": -1.36}`; 26007 of 26024 games had box totals.
+Settings `{"k": 0.11, "kp": 0.03, "regress": 0.85, "hca": 3.0, "b2b": -1.36}`; 26078 of 26095 games had box totals.
 - Test seasons 2025–2026: 50.63% against the closing spread (4766 games), 71.88% winners, 49.5% on totals (4790); margin miss 9.34 vs the close's 8.86
-- Gate: **FAIL** (not enough games with a closing line); games with a closing line: 11165
-- 564 teams rated this season; players with box scores: 5792
+- Gate: **FAIL** (not enough games with a closing line); games with a closing line: 11226
+- 573 teams rated this season; players with box scores: 5910
 
 ## WBB
 
-Settings `{"k": 0.11, "kp": 0.06, "regress": 0.85, "hca": 3.0, "b2b": 0.0}`; 24648 of 24674 games had box totals.
+Settings `{"k": 0.11, "kp": 0.06, "regress": 0.85, "hca": 3.0, "b2b": 0.0}`; 24715 of 24741 games had box totals.
 - Test seasons 2025–2026: 50.8% against the closing spread (811 games), 76.75% winners, 47.61% on totals (796); margin miss 9.81 vs the close's 9.82
-- Gate: **FAIL** (not enough games with a closing line); games with a closing line: 898
-- 553 teams rated this season; players with box scores: 5411
+- Gate: **FAIL** (not enough games with a closing line); games with a closing line: 909
+- 557 teams rated this season; players with box scores: 5468
 
 ## WNBA
 
