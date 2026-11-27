@@ -1,6 +1,6 @@
 # Basketball Claude Model
 
-Updated 2026-11-26T21:44Z. Claude's own algorithm from box-score data only (possessions, efficiency, pace, four factors, rest). Tuned on early seasons, scored walk-forward on later seasons it never saw. Gated: it is labeled unvalidated and moves no chance until the spread gate passes. Break-even at −110 is 52.4%.
+Updated 2026-11-27T21:28Z. Claude's own algorithm from box-score data only (possessions, efficiency, pace, four factors, rest). Tuned on early seasons, scored walk-forward on later seasons it never saw. Gated: it is labeled unvalidated and moves no chance until the spread gate passes. Break-even at −110 is 52.4%.
 
 ## NBA
 
@@ -11,17 +11,17 @@ Settings `{"k": 0.04, "kp": 0.03, "regress": 0.7, "hca": 3.0, "b2b": -2.65}`; 55
 
 ## MBB
 
-Settings `{"k": 0.11, "kp": 0.03, "regress": 0.85, "hca": 3.0, "b2b": -1.36}`; 26474 of 26491 games had box totals.
+Settings `{"k": 0.11, "kp": 0.03, "regress": 0.85, "hca": 3.0, "b2b": -1.36}`; 26495 of 26512 games had box totals.
 - Test seasons 2025–2026: 50.63% against the closing spread (4766 games), 71.88% winners, 49.5% on totals (4790); margin miss 9.34 vs the close's 8.86
-- Gate: **FAIL** (not enough games with a closing line); games with a closing line: 11564
-- 613 teams rated this season; players with box scores: 6379
+- Gate: **FAIL** (not enough games with a closing line); games with a closing line: 11583
+- 613 teams rated this season; players with box scores: 6393
 
 ## WBB
 
-Settings `{"k": 0.11, "kp": 0.06, "regress": 0.85, "hca": 3.0, "b2b": 0.0}`; 25062 of 25088 games had box totals.
+Settings `{"k": 0.11, "kp": 0.06, "regress": 0.85, "hca": 3.0, "b2b": 0.0}`; 25080 of 25106 games had box totals.
 - Test seasons 2025–2026: 50.8% against the closing spread (811 games), 76.75% winners, 47.61% on totals (796); margin miss 9.81 vs the close's 9.82
 - Gate: **FAIL** (not enough games with a closing line); games with a closing line: 945
-- 576 teams rated this season; players with box scores: 5706
+- 576 teams rated this season; players with box scores: 5699
 
 ## WNBA
 

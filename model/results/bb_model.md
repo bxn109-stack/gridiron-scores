@@ -1,6 +1,6 @@
 # Basketball Ledger Model
 
-Updated 2026-11-26T21:44Z. The football Ledger Model's engine on basketball: walk-forward points ratings; settings tuned on early seasons, scored on later seasons never seen while tuning, against ESPN's closing lines. Break-even at −110 is 52.4%.
+Updated 2026-11-27T21:28Z. The football Ledger Model's engine on basketball: walk-forward points ratings; settings tuned on early seasons, scored on later seasons never seen while tuning, against ESPN's closing lines. Break-even at −110 is 52.4%.
 
 ## NBA
 
@@ -13,7 +13,7 @@ Seasons on disk [2023, 2024, 2025, 2026, 2027]; 2643 games with a closing line. 
 
 ## MBB
 
-Seasons on disk [2023, 2024, 2025, 2026, 2027]; 11564 games with a closing line. Tuned on 2024–2024, tested on 2025–2026. Settings `{"k": 0.11, "kt": 0.06, "regress": 0.95, "hfa": 4.0, "cap": 30}`.
+Seasons on disk [2023, 2024, 2025, 2026, 2027]; 11583 games with a closing line. Tuned on 2024–2024, tested on 2025–2026. Settings `{"k": 0.11, "kt": 0.06, "regress": 0.95, "hfa": 4.0, "cap": 30}`.
 - Average miss on the margin, test seasons: model 9.21 pts vs closing line 8.86 pts (4766 games)
 - Spread gate: **FAIL** (not enough games with a closing line)
 - Total gate: **FAIL** (not enough games with a closing line)
@@ -27,7 +27,7 @@ Seasons on disk [2023, 2024, 2025, 2026, 2027]; 945 games with a closing line. T
 - Spread gate: **FAIL** (not enough games with a closing line)
 - Total gate: **FAIL** (not enough games with a closing line)
 - Moneyline blend gate: **FAIL** (not enough games with moneylines)
-- Ratings for 937 teams; push tables: 67 spread rows, 63 total rows
+- Ratings for 937 teams; push tables: 68 spread rows, 63 total rows
 
 ## WNBA
 
